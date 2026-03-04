@@ -133,10 +133,13 @@ class MarioAgent:
         # If you have an Apple Silicon Mac (M1/M2/M3), you can use the MPS chip for speed!
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
+            print("Using GPU...\n")
         elif torch.backends.mps.is_available():
             self.device = torch.device("mps")
+            print("Using MPS...\n")
         else:
             self.device = torch.device("cpu")
+            print("Using CPU...\n")
 
         self.net.to(self.device)
 
