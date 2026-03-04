@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 
 import random
 from collections import deque
@@ -134,7 +135,8 @@ class MarioAgent:
         self.net.to(self.device)
 
         # Learning parameters
-        self.optimizer = optim.Adam(self.net.parameters(), lr=0.00025)
+        self.optimizer = optim.Adam(self.net.parameters(), lr=0.001)
+        self.scheduler = StepLR(self.optimizer, step_size=50000, gamma=0.1)
         self.loss_fn = nn.SmoothL1Loss()
         self.gamma = 0.99
 
