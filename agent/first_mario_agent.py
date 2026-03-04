@@ -15,7 +15,7 @@ import gym
 from gym.spaces import Box
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from gym_super_mario_bros.actions import RIGHT_ONLY
 
 import MarioCNN
 
@@ -81,6 +81,39 @@ class GrayScaleResizeWrapper(gym.ObservationWrapper):
         final_obs = np.expand_dims(resized, axis=-1)
         
         return final_obs
+
+class StuckPenaltyWrapper(gym.Wrapper):
+    def __init__(self, env, max_steps_stuck=25, penalty=-15.0):
+        super().__init__(env)
+        # How many steps to wait before deciding Mario is stuck
+        self.max_steps_stuck = max_steps_stuck
+        # The massive negative reward to teach him a lesson
+        self.penalty = penalty
+        # A memory queue to track his recent x-coordinates
+        self.x_pos_history = deque(maxlen=max_steps_stuck)
+
+    def reset(self, **kwargs):
+        """Clear the history every time a new episode starts."""
+        obs = self.env.reset(**kwargs)
+        self.x_pos_history.clear()
+        return obs
+
+    def step(self, action):
+        """Intercept the step to check Mario's progress."""
+        obs, reward, done, info = self.env.step(action)
+        
+        # gym-super-mario-bros passes Mario's exact location in the 'info' dictionary
+        current_x = info.get('x_pos', 0)
+        self.x_pos_history.append(current_x)
+        
+        # If the history buffer is full, check if he actually moved
+        if len(self.x_pos_history) == self.max_steps_stuck:
+            # If the difference between his furthest and closest x-position is less than 2 pixels, he is stuck
+            if max(self.x_pos_history) - min(self.x_pos_history) < 2:
+                reward += self.penalty
+                done = True  # Instantly kill the episode so we don't waste training time!
+                
+        return obs, reward, done, info
 
 class MarioAgent:
     def __init__(self, action_space_size, model_path=None):
@@ -250,9 +283,11 @@ def main():
     
     # 2. Restrict the action space to standard Mario movements (0 to 6)
     # This makes it much easier for a neural network to learn
-    env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    env = JoypadSpace(env, RIGHT_ONLY)
     env = SkipFrame(env, skip=4)
     
+    env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=-15.0)
+
     env = GrayScaleResizeWrapper(env, shape=(84, 84))
 
     env = FrameStackWrapper(env, num_frames=4)
