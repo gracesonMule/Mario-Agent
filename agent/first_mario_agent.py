@@ -239,7 +239,11 @@ def save_progress_plot(rewards, filename="mario_training_progress.png"):
     plt.close()
 
 def main():
-    random.seed(478)
+    seed = 486
+    random.seed(seed)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
     # 1. Initialize the environment
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
@@ -287,7 +291,7 @@ def main():
             if len(memory) >= batch_size and global_step % 4 == 0:
                 b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
                 loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
-                                
+
         # --- NEW: Logging at the end of every episode ---
         episode_rewards.append(total_reward)
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
