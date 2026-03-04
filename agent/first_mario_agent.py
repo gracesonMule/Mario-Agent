@@ -265,22 +265,29 @@ def main():
     
     episode_rewards = []
     
+# --- NEW: Add a global step counter ---
+    global_step = 0 
+    
     for ep in range(episodes):
         state = env.reset()
         done = False
-        total_reward = 0  # Track the score for this specific episode
+        total_reward = 0
         
         while not done:
             action = agent.act(state)
             next_state, reward, done, info = env.step(action)
             memory.push(state, action, reward, next_state, done)
             state = next_state
-            total_reward += reward  # Add the reward to our total
+            total_reward += reward
             
-            if len(memory) >= batch_size:
+            # --- NEW: Increment the step counter ---
+            global_step += 1 
+            
+            # --- FIXED: Only learn every 4 steps! ---
+            if len(memory) >= batch_size and global_step % 4 == 0:
                 b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
                 loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
-                
+                                
         # --- NEW: Logging at the end of every episode ---
         episode_rewards.append(total_reward)
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
