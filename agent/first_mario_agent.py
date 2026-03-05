@@ -307,7 +307,7 @@ def main():
     agent = MarioAgent(action_space_size=env.action_space.n)
     
     # 4. Start the game loop, how times to run
-    episodes = 500
+    episodes = 5_000
     
 # 1. Initialize the memory buffer to hold the last 50,000 steps
     memory = ReplayMemory(capacity=50000)
