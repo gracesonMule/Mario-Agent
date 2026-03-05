@@ -54,16 +54,7 @@ class MarioCNN(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(self.flattened_size, 512),
             nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Dropout(p=0.2),
+            nn.Dropout(p=0.5),
             nn.Linear(64, num_actions)
         )
 
