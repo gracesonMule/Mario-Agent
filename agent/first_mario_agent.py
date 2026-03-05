@@ -119,13 +119,23 @@ class StuckPenaltyWrapper(gym.Wrapper):
 class MarioAgent:
     def __init__(self, action_space_size, model_path=None):
         self.action_space_size = action_space_size
-        
-        # 1. Instantiate your CNN
+
+        # If you have an Apple Silicon Mac (M1/M2/M3), you can use the MPS chip for speed!
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            print("Using GPU...\n")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print("Using MPS...\n")
+        else:
+            self.device = torch.device("cpu")
+            print("Using CPU...\n")
+
         # It needs to know it is receiving 4 stacked frames and outputting 7 possible actions
-        self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size)
+        self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
 
         # target network (frozen judge)
-        self.target_net = MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
+        self.target_net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
 
         # Clone the starting weights so they match perfectly
         self.target_net.load_state_dict(self.net.state_dict())
@@ -140,20 +150,6 @@ class MarioAgent:
             self.target_net.load_state_dict(self.net.state_dict())
             print(f"Loaded model weights from {model_path}")
             
-        
-        # If you have an Apple Silicon Mac (M1/M2/M3), you can use the MPS chip for speed!
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            print("Using GPU...\n")
-        elif torch.backends.mps.is_available():
-            self.device = torch.device("mps")
-            print("Using MPS...\n")
-        else:
-            self.device = torch.device("cpu")
-            print("Using CPU...\n")
-
-        self.net.to(self.device)
-
         # Learning parameters
         self.optimizer = optim.Adam(self.net.parameters(), lr=0.001)
         self.scheduler = StepLR(self.optimizer, step_size=50000, gamma=0.1)
