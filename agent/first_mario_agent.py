@@ -123,10 +123,21 @@ class MarioAgent:
         # 1. Instantiate your CNN
         # It needs to know it is receiving 4 stacked frames and outputting 7 possible actions
         self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size)
+
+        # target network (frozen judge)
+        self.target_net = MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
+
+        # Clone the starting weights so they match perfectly
+        self.target_net.load_state_dict(self.net.state_dict())
         
-        # 2. Load trained weights if you have them
+        self.target_net.eval()
+        for param in self.target_net.parameters():
+            param.requires_grad = False
+
+        # Load trained weights if you have them
         if model_path:
             self.net.load_state_dict(torch.load(model_path))
+            self.target_net.load_state_dict(self.net.state_dict())
             print(f"Loaded model weights from {model_path}")
             
         
@@ -154,8 +165,16 @@ class MarioAgent:
         self.exploration_rate_min = 0.1
         self.exploration_rate_decay = 0.99999975
 
+        # --- Sync Tracker ---
+        self.learn_step_counter = 0      # Tracks how many times we've called learn()
+        self.sync_every = 10000          # How often to copy weights to the target network
+
+    def sync_target_network(self):
+        """Copies the weights from the online network to the target network."""
+        self.target_net.load_state_dict(self.net.state_dict())
+        print(f"Target Network Synced at step {self.learn_step_counter}!")
+
     def learn(self, states, actions, rewards, next_states, dones):
-        """Trains YOUR CNN on a batch of memories."""
         states = torch.tensor(states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         next_states = torch.tensor(next_states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         
@@ -165,21 +184,28 @@ class MarioAgent:
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
-        # What did your network predict?
+        # What did the ONLINE network predict?
         current_q = self.net(states).gather(1, actions)
 
-        # What is the target value based on the next state?
+        # --- FIXED: What is the target value based on the TARGET network? ---
         with torch.no_grad():
-            next_q = self.net(next_states).max(1)[0].unsqueeze(1)
+            # We ask the frozen target_net for the future value!
+            next_q = self.target_net(next_states).max(1)[0].unsqueeze(1)
             
         target_q = rewards + (self.gamma * next_q * (1 - dones))
 
-        # Backpropagation through your network!
+        # Backpropagation (Only on the Online Network!)
         loss = self.loss_fn(current_q, target_q)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        self.scheduler.step()
         
+        # --- Sync the Target Network periodically ---
+        self.learn_step_counter += 1
+        if self.learn_step_counter % self.sync_every == 0:
+            self.sync_target_network()
+            
         return loss.item()
 
     def act(self, observation):
