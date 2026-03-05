@@ -20,6 +20,8 @@ from gym_super_mario_bros.actions import RIGHT_ONLY
 
 import MarioCNN
 
+EPISODES = 5_000_000
+
 class FrameStackWrapper(gym.Wrapper):
     def __init__(self, env, num_frames=4):
         super().__init__(env)
@@ -162,7 +164,7 @@ class MarioAgent:
         self.exploration_rate_decay = 0.99999975
 
         # --- Sync Tracker ---
-        self.learn_step_counter = 0      # Tracks how many times we've called learn()
+        self.learn_step_counter = 0      # Tracks how many times learn() is called
         self.sync_every = 10000          # How often to copy weights to the target network
 
     def sync_target_network(self):
@@ -183,7 +185,7 @@ class MarioAgent:
         # What did the ONLINE network predict?
         current_q = self.net(states).gather(1, actions)
 
-        # --- FIXED: What is the target value based on the TARGET network? ---
+        # --- What is the target value based on the TARGET network? ---
         with torch.no_grad():
             # We ask the frozen target_net for the future value!
             next_q = self.target_net(next_states).max(1)[0].unsqueeze(1)
@@ -210,7 +212,7 @@ class MarioAgent:
             # EXPLORE
             action_idx = np.random.randint(self.action_space_size)
         else:
-            # EXPLOIT: Use YOUR CNN
+            # EXPLOIT: Use CNN
             state_tensor = torch.tensor(observation, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
             state_tensor = state_tensor.to(self.device)
             
@@ -311,10 +313,10 @@ def main():
     np.random.seed(seed)
     random.seed(seed)
 
-    # 1. Initialize the environment
+    # Initialize the environment
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     
-    # 2. Restrict the action space to standard Mario movements (0 to 6)
+    # Restrict the action space to standard Mario movements (0 to 6)
     # This makes it much easier for a neural network to learn
     env = JoypadSpace(env, RIGHT_ONLY)
     env = SkipFrame(env, skip=4)
@@ -325,19 +327,19 @@ def main():
 
     env = FrameStackWrapper(env, num_frames=4)
 
-    # 3. Instantiate your agent
+    # Instantiate your agent
     agent = MarioAgent(action_space_size=env.action_space.n)
     
-    # 4. Start the game loop, how times to run
-    episodes = 5_000
+    # Start the game loop, how times to run
+    episodes = EPISODES
     
-# 1. Initialize the memory buffer to hold the last 50,000 steps
+# Initialize the memory buffer to hold the last 50,000 steps
     memory = ReplayMemory(capacity=50000)
     batch_size = 32
     
     episode_rewards = []
     
-# --- NEW: Add a global step counter ---
+# --- Add a global step counter ---
     global_step = 0 
     
     for ep in range(episodes):
@@ -352,20 +354,21 @@ def main():
             state = next_state
             total_reward += reward
             
-            # --- NEW: Increment the step counter ---
+            # --- Increment the step counter ---
             global_step += 1 
             
-            # --- FIXED: Only learn every 4 steps! ---
+            # --- Only learn every 4 steps! ---
             if len(memory) >= batch_size and global_step % 4 == 0:
                 b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
                 loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
 
-        # --- NEW: Logging at the end of every episode ---
+        # --- Logging at the end of every episode ---
         episode_rewards.append(total_reward)
-        print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
+        if ep % 1000 == 0:
+            print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
         
         # Every 10 episodes, save the model and update the graph
-        if (ep + 1) % 10 == 0:
+        if (ep + 1) % 10000 == 0:
             # 1. Save the PyTorch model weights
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
             print("--> Model weights saved to mario_cnn_weights.pth")
