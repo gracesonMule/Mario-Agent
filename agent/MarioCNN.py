@@ -55,7 +55,7 @@ class MarioCNN(nn.Module):
             nn.Linear(self.flattened_size, 512),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(64, num_actions)
+            nn.Linear(512, num_actions)
         )
 
     def forward(self, x):
