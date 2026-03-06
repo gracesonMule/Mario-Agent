@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 from collections import deque
-
+import argparse
 import matplotlib.pyplot as plt
 
 import torch
@@ -148,8 +148,8 @@ class MarioAgent:
 
         # Load trained weights if you have them
         if model_path:
-            self.net.load_state_dict(torch.load(model_path))
-            self.target_net.load_state_dict(self.net.state_dict())
+            self.net = torch.load(model_path)
+            self.target_net = torch.load(model_path)
             print(f"Loaded model weights from {model_path}")
             
         # Learning parameters
@@ -306,7 +306,7 @@ def save_progress_plot(rewards, filename="mario_training_progress.png"):
     plt.savefig(filename)
     plt.close()
 
-def main():
+def main(model_path):
     seed = 486
     random.seed(seed)
     torch.manual_seed(seed)
@@ -328,7 +328,7 @@ def main():
     env = FrameStackWrapper(env, num_frames=4)
 
     # Instantiate your agent
-    agent = MarioAgent(action_space_size=env.action_space.n)
+    agent = MarioAgent(action_space_size=env.action_space.n, model_path=model_path)
     
     # Start the game loop, how times to run
     episodes = EPISODES
@@ -370,11 +370,18 @@ def main():
         # Every 10 episodes, save the model and update the graph
         if (ep + 1) % 10000 == 0:
             # 1. Save the PyTorch model weights
+            torch.save(agent.net, "mario_cnn_model.pth")
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
-            print("--> Model weights saved to mario_cnn_weights.pth")
+            print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
             # 2. Update the progress graph
             save_progress_plot(episode_rewards)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Load model from path")
+
+    parser.add_argument('--path', default=None, help="Load model from path", required=False)
+
+    args = parser.parse_args()
+
+    main(model_path=args.path)
