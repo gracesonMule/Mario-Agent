@@ -56,23 +56,23 @@ class MarioCNN(nn.Module):
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
-            nn.Linear(self.flattened_size, 256),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
-            nn.Linear(self.flattened_size, 128),
+            nn.Linear(256, 128),
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
-            nn.Linear(self.flattened_size, 64),
+            nn.Linear(128, 64),
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
-            nn.Linear(self.flattened_size, 32),
+            nn.Linear(64, 32),
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
-            nn.Linear(self.flattened_size, 16),
+            nn.Linear(32, 16),
             nn.ReLU(),
             nn.Dropout(p=0.1),
 
