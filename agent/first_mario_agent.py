@@ -392,10 +392,12 @@ def main(model_path):
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
             print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
-        if (ep + 1) % 1000==0:
+        ma = EPISODES * 0.2   
+
+        if (ep + 1) % ma==0:
             try:
                 # 2. Update the progress graph
-                save_progress_plot(episode_rewards, ma=EPISODES*0.2)
+                save_progress_plot(episode_rewards, ma=ma)
             except:
                 print("If you're reading this it means I broke the graph function...")
 
