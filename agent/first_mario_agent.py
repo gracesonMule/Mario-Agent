@@ -370,11 +370,11 @@ def main(model_path):
 
         # --- Logging at the end of every episode ---
         episode_rewards.append(total_reward)
-        if ep % 1000 == 0:
-            print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
+        
+        print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
         
         # Every 10 episodes, save the model and update the graph
-        if (ep + 1) % 10000 == 0:
+        if (ep + 1) % 10 == 0:
             # 1. Save the PyTorch model weights
             torch.save(agent.net, "mario_cnn_model.pth")
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
