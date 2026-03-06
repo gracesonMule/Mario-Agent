@@ -303,16 +303,16 @@ class SkipFrame(gym.Wrapper):
                 break
         return obs, total_reward, done, info
 
-def save_progress_plot(rewards, filename="mario_training_progress.png"):
+def save_progress_plot(rewards, ma, filename="mario_training_progress.png"):
     """Saves a line graph of the agent's rewards over time."""
     plt.figure(figsize=(10, 5))
     plt.plot(rewards, color='blue', label='Episode Reward')
     
     # Add a trendline (Moving Average of the last 10 episodes)
-    if len(rewards) >= 1000:
-        moving_avg = np.convolve(rewards, np.ones(1000)/1000, mode='valid')
+    if len(rewards) >= ma:
+        moving_avg = np.convolve(rewards, np.ones(ma)/ma, mode='valid')
         # Shift the moving average to align with the end of the graph
-        plt.plot(range(999, len(rewards)), moving_avg, color='orange', label='1000-Episode Moving Avg', linewidth=2)
+        plt.plot(range(ma-1, len(rewards)), moving_avg, color='orange', label=f'{ma}-Episode Moving Avg', linewidth=2)
         
     plt.title("Mario Agent Training Progress")
     plt.xlabel("Episode")
@@ -395,7 +395,7 @@ def main(model_path):
         if (ep + 1) % 1000==0:
             try:
                 # 2. Update the progress graph
-                save_progress_plot(episode_rewards)
+                save_progress_plot(episode_rewards, ma=EPISODES*0.2)
             except:
                 print("If you're reading this it means I broke the graph function...")
 
