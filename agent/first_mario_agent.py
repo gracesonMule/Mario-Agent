@@ -21,6 +21,12 @@ from gym_super_mario_bros.actions import RIGHT_ONLY
 import MarioCNN
 
 EPISODES = 5_000_000
+LR = 0.1
+LR_DECAY = 0.09
+
+STARTING_EPSILON = 1 
+MIN_EPSILON = 0.1 # Smallest possible value for Epsilon
+EPSILON_DECAY = 0.99999975
 
 class FrameStackWrapper(gym.Wrapper):
     def __init__(self, env, num_frames=4):
@@ -153,15 +159,15 @@ class MarioAgent:
             print(f"Loaded model weights from {model_path}")
             
         # Learning parameters
-        self.optimizer = optim.Adam(self.net.parameters(), lr=0.001)
-        self.scheduler = StepLR(self.optimizer, step_size=50000, gamma=0.1)
+        self.optimizer = optim.Adam(self.net.parameters(), lr=LR)
+        self.scheduler = StepLR(self.optimizer, step_size=50000, gamma=LR_DECAY)
         self.loss_fn = nn.SmoothL1Loss()
         self.gamma = 0.99
 
         # Epsilon-Greedy parameters
-        self.exploration_rate = 1.0
-        self.exploration_rate_min = 0.1
-        self.exploration_rate_decay = 0.99999975
+        self.exploration_rate = STARTING_EPSILON
+        self.exploration_rate_min = MIN_EPSILON
+        self.exploration_rate_decay = EPSILON_DECAY
 
         # --- Sync Tracker ---
         self.learn_step_counter = 0      # Tracks how many times learn() is called
