@@ -154,8 +154,17 @@ class MarioAgent:
 
         # Load trained weights if you have them
         if model_path:
-            self.net = torch.load(model_path)
-            self.target_net = torch.load(model_path)
+            loaded_data = torch.load(model_path, map_location=self.device)
+            
+            # Check if user loaded a full model object
+            if isinstance(loaded_data, nn.Module):
+                print("Detected full model object. Extracting state_dict...")
+                weights = loaded_data.state_dict()
+            else:
+                weights = loaded_data
+                
+            self.net.load_state_dict(weights)
+            self.target_net.load_state_dict(weights)
             print(f"Loaded model weights from {model_path}")
             
         # Learning parameters
