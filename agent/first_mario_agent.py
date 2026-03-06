@@ -1,12 +1,13 @@
 import numpy as np
 import cv2
 from collections import deque
-
+import argparse
 import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
 
 import random
 from collections import deque
@@ -15,9 +16,17 @@ import gym
 from gym.spaces import Box
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from gym_super_mario_bros.actions import RIGHT_ONLY
 
 import MarioCNN
+
+EPISODES = 5_000_000
+LR = 0.1
+LR_DECAY = 0.09
+
+STARTING_EPSILON = 1 
+MIN_EPSILON = 0.1 # Smallest possible value for Epsilon
+EPSILON_DECAY = 0.99999975
 
 class FrameStackWrapper(gym.Wrapper):
     def __init__(self, env, num_frames=4):
@@ -82,36 +91,94 @@ class GrayScaleResizeWrapper(gym.ObservationWrapper):
         
         return final_obs
 
+class StuckPenaltyWrapper(gym.Wrapper):
+    def __init__(self, env, max_steps_stuck=25, penalty=-15.0):
+        super().__init__(env)
+        # How many steps to wait before deciding Mario is stuck
+        self.max_steps_stuck = max_steps_stuck
+        # The massive negative reward to teach him a lesson
+        self.penalty = penalty
+        # A memory queue to track his recent x-coordinates
+        self.x_pos_history = deque(maxlen=max_steps_stuck)
+
+    def reset(self, **kwargs):
+        """Clear the history every time a new episode starts."""
+        obs = self.env.reset(**kwargs)
+        self.x_pos_history.clear()
+        return obs
+
+    def step(self, action):
+        """Intercept the step to check Mario's progress."""
+        obs, reward, done, info = self.env.step(action)
+        
+        # gym-super-mario-bros passes Mario's exact location in the 'info' dictionary
+        current_x = info.get('x_pos', 0)
+        self.x_pos_history.append(current_x)
+        
+        # If the history buffer is full, check if he actually moved
+        if len(self.x_pos_history) == self.max_steps_stuck:
+            # If the difference between his furthest and closest x-position is less than 2 pixels, he is stuck
+            if max(self.x_pos_history) - min(self.x_pos_history) < 2:
+                reward += self.penalty
+                done = True  # Instantly kill the episode so we don't waste training time!
+                
+        return obs, reward, done, info
+
 class MarioAgent:
     def __init__(self, action_space_size, model_path=None):
         self.action_space_size = action_space_size
-        
-        # 1. Instantiate your CNN
+
+        # If you have an Apple Silicon Mac (M1/M2/M3), you can use the MPS chip for speed!
+        if torch.cuda.is_available():
+            self.device = torch.device("cuda")
+            print("Using GPU...\n")
+        elif torch.backends.mps.is_available():
+            self.device = torch.device("mps")
+            print("Using MPS...\n")
+        else:
+            self.device = torch.device("cpu")
+            print("Using CPU...\n")
+
         # It needs to know it is receiving 4 stacked frames and outputting 7 possible actions
-        self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size)
+        self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
+
+        # target network (frozen judge)
+        self.target_net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
+
+        # Clone the starting weights so they match perfectly
+        self.target_net.load_state_dict(self.net.state_dict())
         
-        # 2. Load trained weights if you have them
+        self.target_net.eval()
+        for param in self.target_net.parameters():
+            param.requires_grad = False
+
+        # Load trained weights if you have them
         if model_path:
-            self.net.load_state_dict(torch.load(model_path))
+            self.net = torch.load(model_path)
+            self.target_net = torch.load(model_path)
             print(f"Loaded model weights from {model_path}")
             
-        
-        # If you have an Apple Silicon Mac (M1/M2/M3), you can use the MPS chip for speed!
-        self.device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
-        self.net.to(self.device)
-
         # Learning parameters
-        self.optimizer = optim.Adam(self.net.parameters(), lr=0.00025)
+        self.optimizer = optim.Adam(self.net.parameters(), lr=LR)
+        self.scheduler = StepLR(self.optimizer, step_size=50000, gamma=LR_DECAY)
         self.loss_fn = nn.SmoothL1Loss()
         self.gamma = 0.99
 
         # Epsilon-Greedy parameters
-        self.exploration_rate = 1.0
-        self.exploration_rate_min = 0.1
-        self.exploration_rate_decay = 0.99999975
+        self.exploration_rate = STARTING_EPSILON
+        self.exploration_rate_min = MIN_EPSILON
+        self.exploration_rate_decay = EPSILON_DECAY
+
+        # --- Sync Tracker ---
+        self.learn_step_counter = 0      # Tracks how many times learn() is called
+        self.sync_every = 10000          # How often to copy weights to the target network
+
+    def sync_target_network(self):
+        """Copies the weights from the online network to the target network."""
+        self.target_net.load_state_dict(self.net.state_dict())
+        print(f"Target Network Synced at step {self.learn_step_counter}!")
 
     def learn(self, states, actions, rewards, next_states, dones):
-        """Trains YOUR CNN on a batch of memories."""
         states = torch.tensor(states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         next_states = torch.tensor(next_states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         
@@ -121,21 +188,28 @@ class MarioAgent:
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
-        # What did your network predict?
+        # What did the ONLINE network predict?
         current_q = self.net(states).gather(1, actions)
 
-        # What is the target value based on the next state?
+        # --- What is the target value based on the TARGET network? ---
         with torch.no_grad():
-            next_q = self.net(next_states).max(1)[0].unsqueeze(1)
+            # We ask the frozen target_net for the future value!
+            next_q = self.target_net(next_states).max(1)[0].unsqueeze(1)
             
         target_q = rewards + (self.gamma * next_q * (1 - dones))
 
-        # Backpropagation through your network!
+        # Backpropagation (Only on the Online Network!)
         loss = self.loss_fn(current_q, target_q)
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
+        self.scheduler.step()
         
+        # --- Sync the Target Network periodically ---
+        self.learn_step_counter += 1
+        if self.learn_step_counter % self.sync_every == 0:
+            self.sync_target_network()
+            
         return loss.item()
 
     def act(self, observation):
@@ -144,7 +218,7 @@ class MarioAgent:
             # EXPLORE
             action_idx = np.random.randint(self.action_space_size)
         else:
-            # EXPLOIT: Use YOUR CNN
+            # EXPLOIT: Use CNN
             state_tensor = torch.tensor(observation, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
             state_tensor = state_tensor.to(self.device)
             
@@ -238,38 +312,40 @@ def save_progress_plot(rewards, filename="mario_training_progress.png"):
     plt.savefig(filename)
     plt.close()
 
-def main():
+def main(model_path):
     seed = 486
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
 
-    # 1. Initialize the environment
+    # Initialize the environment
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     
-    # 2. Restrict the action space to standard Mario movements (0 to 6)
+    # Restrict the action space to standard Mario movements (0 to 6)
     # This makes it much easier for a neural network to learn
-    env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    env = JoypadSpace(env, RIGHT_ONLY)
     env = SkipFrame(env, skip=4)
     
+    env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=-15.0)
+
     env = GrayScaleResizeWrapper(env, shape=(84, 84))
 
     env = FrameStackWrapper(env, num_frames=4)
 
-    # 3. Instantiate your agent
-    agent = MarioAgent(action_space_size=env.action_space.n)
+    # Instantiate your agent
+    agent = MarioAgent(action_space_size=env.action_space.n, model_path=model_path)
     
-    # 4. Start the game loop, how times to run
-    episodes = 500
+    # Start the game loop, how times to run
+    episodes = EPISODES
     
-# 1. Initialize the memory buffer to hold the last 50,000 steps
+# Initialize the memory buffer to hold the last 50,000 steps
     memory = ReplayMemory(capacity=50000)
     batch_size = 32
     
     episode_rewards = []
     
-# --- NEW: Add a global step counter ---
+# --- Add a global step counter ---
     global_step = 0 
     
     for ep in range(episodes):
@@ -284,26 +360,34 @@ def main():
             state = next_state
             total_reward += reward
             
-            # --- NEW: Increment the step counter ---
+            # --- Increment the step counter ---
             global_step += 1 
             
-            # --- FIXED: Only learn every 4 steps! ---
+            # --- Only learn every 4 steps! ---
             if len(memory) >= batch_size and global_step % 4 == 0:
                 b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
                 loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
 
-        # --- NEW: Logging at the end of every episode ---
+        # --- Logging at the end of every episode ---
         episode_rewards.append(total_reward)
-        print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
+        if ep % 1000 == 0:
+            print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
         
         # Every 10 episodes, save the model and update the graph
-        if (ep + 1) % 10 == 0:
+        if (ep + 1) % 10000 == 0:
             # 1. Save the PyTorch model weights
+            torch.save(agent.net, "mario_cnn_model.pth")
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
-            print("--> Model weights saved to mario_cnn_weights.pth")
+            print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
             # 2. Update the progress graph
             save_progress_plot(episode_rewards)
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Load model from path")
+
+    parser.add_argument('--path', default=None, help="Load model from path", required=False)
+
+    args = parser.parse_args()
+
+    main(model_path=args.path)

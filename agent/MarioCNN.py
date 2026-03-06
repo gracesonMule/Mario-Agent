@@ -54,8 +54,29 @@ class MarioCNN(nn.Module):
         self.classifier = nn.Sequential(
             nn.Linear(self.flattened_size, 512),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(512, num_actions)
+            nn.Dropout(p=0.1),
+
+            nn.Linear(self.flattened_size, 256),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+
+            nn.Linear(self.flattened_size, 128),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+
+            nn.Linear(self.flattened_size, 64),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+
+            nn.Linear(self.flattened_size, 32),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+
+            nn.Linear(self.flattened_size, 16),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+
+            nn.Linear(16, num_actions)
         )
 
     def forward(self, x):
