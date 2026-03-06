@@ -202,9 +202,12 @@ class MarioAgent:
 
         # --- What is the target value based on the TARGET network? ---
         with torch.no_grad():
-            # We ask the frozen target_net for the future value!
-            next_q = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            # 1. Use the ONLINE network to choose the best action for the next state
+            best_actions_next = self.net(next_states).argmax(dim=1, keepdim=True)
             
+            # 2. Use the TARGET network to evaluate the Q-value of that specific action
+            next_q = self.target_net(next_states).gather(1, best_actions_next)
+                        
         target_q = rewards + (self.gamma * next_q * (1 - dones))
 
         # Backpropagation (Only on the Online Network!)
