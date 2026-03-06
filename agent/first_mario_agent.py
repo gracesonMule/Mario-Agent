@@ -21,8 +21,8 @@ from gym_super_mario_bros.actions import RIGHT_ONLY
 import MarioCNN
 
 EPISODES = 5_000_000
-LR = 0.1
-LR_DECAY = 0.09
+LR = 0.0001
+LR_DECAY = 0.99
 
 STARTING_EPSILON = 0.1 
 MIN_EPSILON = 0.005 # Smallest possible value for Epsilon
