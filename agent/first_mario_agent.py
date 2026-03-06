@@ -309,10 +309,10 @@ def save_progress_plot(rewards, filename="mario_training_progress.png"):
     plt.plot(rewards, color='blue', label='Episode Reward')
     
     # Add a trendline (Moving Average of the last 10 episodes)
-    if len(rewards) >= 10:
-        moving_avg = np.convolve(rewards, np.ones(10)/10, mode='valid')
+    if len(rewards) >= 1000:
+        moving_avg = np.convolve(rewards, np.ones(1000)/1000, mode='valid')
         # Shift the moving average to align with the end of the graph
-        plt.plot(range(9, len(rewards)), moving_avg, color='orange', label='10-Episode Moving Avg', linewidth=2)
+        plt.plot(range(999, len(rewards)), moving_avg, color='orange', label='1000-Episode Moving Avg', linewidth=2)
         
     plt.title("Mario Agent Training Progress")
     plt.xlabel("Episode")
@@ -385,15 +385,19 @@ def main(model_path):
         
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
         
-        # Every 10 episodes, save the model and update the graph
+        # Every 10 episodes, save the model
         if (ep + 1) % 10 == 0:
             # 1. Save the PyTorch model weights
             torch.save(agent.net, "mario_cnn_model.pth")
             torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
             print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
-            # 2. Update the progress graph
-            save_progress_plot(episode_rewards)
+        if (ep + 1) % 1000==0:
+            try:
+                # 2. Update the progress graph
+                save_progress_plot(episode_rewards)
+            except:
+                print("If you're reading this it means I broke the graph function...")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load model from path")
