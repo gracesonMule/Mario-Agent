@@ -24,8 +24,8 @@ EPISODES = 5_000_000
 LR = 0.1
 LR_DECAY = 0.09
 
-STARTING_EPSILON = 1 
-MIN_EPSILON = 0.1 # Smallest possible value for Epsilon
+STARTING_EPSILON = 0.1 
+MIN_EPSILON = 0.005 # Smallest possible value for Epsilon
 EPSILON_DECAY = 0.99999975
 
 class FrameStackWrapper(gym.Wrapper):
