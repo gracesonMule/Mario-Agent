@@ -3,6 +3,8 @@ import cv2
 from collections import deque
 import argparse
 import matplotlib.pyplot as plt
+import os
+import traceback
 
 import torch
 import torch.nn as nn
@@ -308,7 +310,7 @@ def save_progress_plot(rewards, ma, filename="mario_training_progress.png"):
     plt.figure(figsize=(10, 5))
     plt.plot(rewards, color='blue', label='Episode Reward')
     
-    # Add a trendline (Moving Average of the last 10 episodes)
+    # Add a trendline (Moving Average of the last x episodes)
     if len(rewards) >= ma:
         moving_avg = np.convolve(rewards, np.ones(ma)/ma, mode='valid')
         # Shift the moving average to align with the end of the graph
@@ -324,12 +326,19 @@ def save_progress_plot(rewards, ma, filename="mario_training_progress.png"):
     plt.savefig(filename)
     plt.close()
 
-def main(model_path):
+def main(model_path, outdir):
     seed = 486
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+
+    model_outdir = os.path.join(outdir, "mario_cnn_model.pth")
+
+    weights_outdir = os.path.join(outdir, "mario_cnn_weights.pth")
 
     # Initialize the environment
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
@@ -387,25 +396,28 @@ def main(model_path):
         
         # Every 10 episodes, save the model
         if (ep + 1) % 10 == 0:
-            # 1. Save the PyTorch model weights
-            torch.save(agent.net, "mario_cnn_model.pth")
-            torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
+            # Save the PyTorch model weights
+            torch.save(agent.net, model_outdir)
+            torch.save(agent.net.state_dict(), weights_outdir)
             print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
-        ma = EPISODES * 0.2   
+        ma = int(EPISODES * 0.2)
 
         if (ep + 1) % ma==0:
             try:
-                # 2. Update the progress graph
+                # Update the progress graph
                 save_progress_plot(episode_rewards, ma=ma)
             except:
                 print("If you're reading this it means I broke the graph function...")
+                traceback.print_exc()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load model from path")
 
-    parser.add_argument('--path', default=None, help="Load model from path", required=False)
+    parser.add_argument('--loadpath', help="Path to load model or weights from.", default=None, required=False)
+    
+    parser.add_argument('--outdir', help="Directory to save model and weights to.", default=None, required=True)
 
     args = parser.parse_args()
 
-    main(model_path=args.path)
+    main(model_path=args.loadpath, outdir=args.outdir)
