@@ -122,7 +122,7 @@ class StuckPenaltyWrapper(gym.Wrapper):
             # If the difference between his furthest and closest x-position is less than 2 pixels, he is stuck
             if max(self.x_pos_history) - min(self.x_pos_history) < 2:
                 reward += self.penalty
-                done = True  # Instantly kill the episode so we don't waste training time!
+                #done = False  # Instantly kill the episode so we don't waste training time!
                 
         return obs, reward, done, info
 
@@ -394,6 +394,8 @@ def main(model_path, outdir):
         
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
         
+        ma = int(EPISODES * 0.2)
+
         # Every 10 episodes, save the model
         if (ep + 1) % 10 == 0:
             # Save the PyTorch model weights
@@ -401,12 +403,9 @@ def main(model_path, outdir):
             torch.save(agent.net.state_dict(), weights_outdir)
             print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
-        ma = int(EPISODES * 0.2)
-
-        if (ep + 1) % ma==0:
             try:
                 # Update the progress graph
-                save_progress_plot(episode_rewards, ma=ma)
+                save_progress_plot(rewards=episode_rewards, ma=ma, filename=f"{outdir}/mario_training_progress.png")
             except:
                 print("If you're reading this it means I broke the graph function...")
                 traceback.print_exc()
