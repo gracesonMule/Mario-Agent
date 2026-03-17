@@ -2,18 +2,19 @@ import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import RIGHT_ONLY
 from gym.wrappers import RecordVideo
+import argparse
 
 # Import your custom agent and wrappers from your training script
 from first_mario_agent import MarioAgent, SkipFrame, GrayScaleResizeWrapper, FrameStackWrapper
 
-def watch_mario():
+def watch_mario(inputdir):
     # 1. Initialize the environment identically to training
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = JoypadSpace(env, RIGHT_ONLY)
 
     env = RecordVideo(
         env, 
-        video_folder='./mario_replays',
+        video_folder=f'./{inputdir}/mario_replays',
         episode_trigger=lambda episode_id: True, # This tells it to record EVERY episode
         name_prefix='mario-agent'
     )
@@ -24,7 +25,7 @@ def watch_mario():
 
     # 2. Instantiate the agent AND load your saved weights
     # Make sure "mario_cnn_weights.pth" matches the filename you saved earlier!
-    agent = MarioAgent(action_space_size=env.action_space.n, model_path="mario_cnn_weights.pth")
+    agent = MarioAgent(action_space_size=env.action_space.n, model_path=f"{inputdir}/mario_cnn_weights.pth")
     
     # 3. Shut down Epsilon-Greedy exploration
     # We want 100% exploitation of the trained neural network
@@ -57,4 +58,7 @@ def watch_mario():
     env.close()
 
 if __name__ == "__main__":
-    watch_mario()
+    parser = argparse.ArgumentParser(description="Load model weights from path")
+    parser.add_argument('--inputdir', help="Path to load model weights from.", default=None, required=True)
+    args = parser.parse_args()
+    watch_mario(inputdir=args.inputdir)
