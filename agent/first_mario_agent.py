@@ -122,7 +122,7 @@ class StuckPenaltyWrapper(gym.Wrapper):
             # If the difference between his furthest and closest x-position is less than 2 pixels, he is stuck
             if max(self.x_pos_history) - min(self.x_pos_history) < 2:
                 reward += self.penalty
-                #done = False  # Instantly kill the episode so we don't waste training time!
+                done = True  # Instantly kill the episode so we don't waste training time!
                 
         return obs, reward, done, info
 
@@ -189,7 +189,7 @@ class MarioAgent:
         self.target_net.load_state_dict(self.net.state_dict())
         print(f"Target Network Synced at step {self.learn_step_counter}!")
 
-    def learn(self, states, actions, rewards, next_states, dones):
+    def learn(self, states, actions, rewards, next_states, dones, weights):
         states = torch.tensor(states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         next_states = torch.tensor(next_states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         
@@ -198,6 +198,8 @@ class MarioAgent:
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(self.device)
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
+
+        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(self.device)
 
         # What did the ONLINE network predict?
         current_q = self.net(states).gather(1, actions)
@@ -212,19 +214,29 @@ class MarioAgent:
                         
         target_q = rewards + (self.gamma * next_q * (1 - dones))
 
-        # Backpropagation (Only on the Online Network!)
-        loss = self.loss_fn(current_q, target_q)
+        # --- Calculate TD Error for Priorities ---
+        # We use .detach() to ensure we don't accidentally backpropagate through the priorities
+        td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+
+        # --- Weighted Backpropagation ---
+        # Change SmoothL1Loss to not reduce automatically
+        loss_fn = nn.SmoothL1Loss(reduction='none') 
+        elementwise_loss = loss_fn(current_q, target_q)
+
+        # Apply the Importance Sampling weights
+        loss = torch.mean(elementwise_loss * weights)
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         self.scheduler.step()
         
-        # --- Sync the Target Network periodically ---
         self.learn_step_counter += 1
         if self.learn_step_counter % self.sync_every == 0:
             self.sync_target_network()
             
-        return loss.item()
+        # Return the loss and the new priorities (adding epsilon so priority > 0)
+        return loss.item(), td_errors + 1e-5
 
     def act(self, observation):
         """Chooses an action based on Epsilon-Greedy exploration."""
@@ -248,45 +260,60 @@ class MarioAgent:
 
         return action_idx    
     
-class ReplayMemory:
-    def __init__(self, capacity):
-        # A deque is a double-ended queue. When it hits 'maxlen', 
-        # it automatically drops the oldest item to make room for the new one.
-        self.memory = deque(maxlen=capacity)
+class PrioritizedReplayMemory:
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.memory = []
+        # Pre-allocate numpy arrays for speed
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.position = 0
 
     def push(self, state, action, reward, next_state, done):
-        """
-        Saves a single transition to the memory buffer.
-        """
-        # We store everything as raw data (ints, floats, and numpy arrays) to save RAM.
-        self.memory.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        """
-        Randomly grabs a batch of transitions to train the neural network.
-        """
-        # 1. Grab 'batch_size' number of random transitions
-        batch = random.sample(self.memory, batch_size)
+        """Saves a transition and assigns it the maximum known priority."""
+        max_prio = self.priorities.max() if self.memory else 1.0
         
-        # 2. 'Unzip' the batch. 
-        # This turns a list of tuples like [(s1, a1, r1...), (s2, a2, r2...)]
-        # into separate lists: states=[s1, s2], actions=[a1, a2], etc.
+        if len(self.memory) < self.capacity:
+            self.memory.append((state, action, reward, next_state, done))
+        else:
+            self.memory[self.position] = (state, action, reward, next_state, done)
+        
+        self.priorities[self.position] = max_prio
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        """Samples a batch weighted by priority, returning IS weights and indices."""
+        if len(self.memory) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:len(self.memory)]
+            
+        # Calculate probabilities
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+        
+        indices = np.random.choice(len(self.memory), batch_size, p=probs)
+        batch = [self.memory[idx] for idx in indices]
+        
+        # Calculate Importance Sampling weights
+        total = len(self.memory)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max() # Normalize for stability
+        
         states, actions, rewards, next_states, dones = zip(*batch)
         
-        # 3. Convert them to NumPy arrays for speed
-        states = np.array(states)
-        actions = np.array(actions)
-        rewards = np.array(rewards, dtype=np.float32)
-        next_states = np.array(next_states)
-        dones = np.array(dones, dtype=np.bool_)
-        
-        # 4. Return them so your training loop can convert them to PyTorch tensors
-        return states, actions, rewards, next_states, dones
+        return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), 
+                np.array(next_states), np.array(dones, dtype=np.bool_), 
+                indices, np.array(weights, dtype=np.float32))
+
+    def update_priorities(self, batch_indices, batch_priorities):
+        """Updates the priorities for the sampled batch after learning."""
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
 
     def __len__(self):
-        """Allows us to check how full the memory is by calling len(memory)."""
         return len(self.memory)
-
+    
 class SkipFrame(gym.Wrapper):
     def __init__(self, env, skip=4):
         """Return only every `skip`-th frame"""
@@ -361,7 +388,7 @@ def main(model_path, outdir):
     episodes = EPISODES
     
 # Initialize the memory buffer to hold the last 50,000 steps
-    memory = ReplayMemory(capacity=50000)
+    memory = PrioritizedReplayMemory(capacity=50000)
     batch_size = 32
     
     episode_rewards = []
@@ -386,8 +413,14 @@ def main(model_path, outdir):
             
             # --- Only learn every 4 steps! ---
             if len(memory) >= batch_size and global_step % 4 == 0:
-                b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
-                loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
+                # 1. Unpack the new indices and weights
+                b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=0.4)
+                
+                # 2. Pass weights to learn, and receive td_errors back
+                loss, td_errors = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones, b_weights)
+                
+                # 3. Update the buffer with the new priorities
+                memory.update_priorities(b_indices, td_errors)
 
         # --- Logging at the end of every episode ---
         episode_rewards.append(total_reward)
