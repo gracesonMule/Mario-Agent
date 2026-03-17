@@ -16,7 +16,7 @@ import gym
 from gym.spaces import Box
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import RIGHT_ONLY
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 import MarioCNN
 
@@ -333,7 +333,7 @@ def main(model_path):
     
     # Restrict the action space to standard Mario movements (0 to 6)
     # This makes it much easier for a neural network to learn
-    env = JoypadSpace(env, RIGHT_ONLY)
+    env = JoypadSpace(env, COMPLEX_MOVEMENT)
     env = SkipFrame(env, skip=4)
     
     env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=-15.0)
