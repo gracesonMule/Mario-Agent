@@ -3,6 +3,7 @@ from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import RIGHT_ONLY
 from gym.wrappers import RecordVideo
 import argparse
+import os
 
 # Import your custom agent and wrappers from your training script
 from first_mario_agent import MarioAgent, SkipFrame, GrayScaleResizeWrapper, FrameStackWrapper
@@ -12,9 +13,11 @@ def watch_mario(inputdir):
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
     env = JoypadSpace(env, RIGHT_ONLY)
 
+    file_path = os.path.join(inputdir, 'mario_replays')
+
     env = RecordVideo(
         env, 
-        video_folder=f'./{inputdir}/mario_replays',
+        video_folder=file_path,
         episode_trigger=lambda episode_id: True, # This tells it to record EVERY episode
         name_prefix='mario-agent'
     )
