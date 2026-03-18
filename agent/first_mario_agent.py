@@ -5,6 +5,7 @@ import argparse
 import matplotlib.pyplot as plt
 import os
 import traceback
+import warnings
 
 import torch
 import torch.nn as nn
@@ -157,14 +158,16 @@ class MarioAgent:
 
         # Load trained weights if you have them
         if model_path:
-            loaded_data = torch.load(model_path, map_location=self.device)
-            
+            warnings.filterwarnings("error")
+
             # Check if user loaded a full model object
-            if isinstance(loaded_data, nn.Module):
-                print("Detected full model object. Extracting state_dict...")
-                weights = loaded_data.state_dict()
-            else:
-                weights = loaded_data
+            try:
+                weights = torch.load(model_path, map_location=self.device, weights_only=True)
+            except UserWarning as e:
+                full_model = torch.load(model_path, map_location=self.device, weights_only=False)
+                weights = full_model.state_dict()
+                
+            warnings.resetwarnings()
                 
             self.net.load_state_dict(weights)
             self.target_net.load_state_dict(weights)
