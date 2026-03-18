@@ -22,6 +22,7 @@ from gym_super_mario_bros.actions import RIGHT_ONLY
 
 import MarioCNN
 
+MOVING_AVG = 10000
 EPISODES = 5_000_000
 LR = 0.0001
 LR_DECAY = 0.99
@@ -426,8 +427,6 @@ def main(model_path, outdir):
         episode_rewards.append(total_reward)
         
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
-        
-        ma = int(EPISODES * 0.2)
 
         # Every 10 episodes, save the model
         if (ep + 1) % 10 == 0:
@@ -438,7 +437,11 @@ def main(model_path, outdir):
             
             try:
                 # Update the progress graph
-                save_progress_plot(rewards=episode_rewards, ma=ma, filename=f"{outdir}/mario_training_progress.png")
+                if outdir:
+                    file_path = os.path.join(outdir, "mario_training_progress.png")
+                else:
+                    file_path = "mario_training_progress.png"
+                save_progress_plot(rewards=episode_rewards, ma=MOVING_AVG, filename=file_path)
             except:
                 print("If you're reading this it means I broke the graph function...")
                 traceback.print_exc()
