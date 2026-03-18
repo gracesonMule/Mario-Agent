@@ -128,6 +128,28 @@ class StuckPenaltyWrapper(gym.Wrapper):
                 
         return obs, reward, done, info
 
+class LinearSchedule:
+    def __init__(self, start_val, end_val, total_steps):
+        """
+        Linearly scales a value from start_val to end_val over total_steps.
+        """
+        self.start_val = start_val
+        self.end_val = end_val
+        self.total_steps = total_steps
+        self.current_step = 0
+
+    def value(self):
+        """Returns the current value based on the step count."""
+        # Calculate how far along we are (from 0.0 to 1.0)
+        fraction = min(float(self.current_step) / self.total_steps, 1.0)
+        
+        # Linearly interpolate between start and end
+        return self.start_val + fraction * (self.end_val - self.start_val)
+
+    def step(self):
+        """Increments the internal step counter."""
+        self.current_step += 1
+
 class MarioAgent:
     def __init__(self, action_space_size, model_path=None):
         self.action_space_size = action_space_size
@@ -400,6 +422,8 @@ def main(model_path, outdir):
 # --- Add a global step counter ---
     global_step = 0 
     
+    beta_schedule = LinearSchedule(start_val=0.4, end_val=1.0, total_steps=1_000_000)
+
     for ep in range(episodes):
         state = env.reset()
         done = False
@@ -415,10 +439,12 @@ def main(model_path, outdir):
             # --- Increment the step counter ---
             global_step += 1 
             
+            beta_schedule.step()
             # --- Only learn every 4 steps! ---
             if len(memory) >= batch_size and global_step % 4 == 0:
                 # 1. Unpack the new indices and weights
-                b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=0.4)
+                current_beta = beta_schedule.value()
+                b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=current_beta)
                 
                 # 2. Pass weights to learn, and receive td_errors back
                 loss, td_errors = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones, b_weights)
