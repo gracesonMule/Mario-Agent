@@ -4,6 +4,26 @@ import pygame
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
 from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+import re
+
+def get_max_file_number(directory):
+    numbers = []
+    
+    # Check if the directory exists to avoid errors
+    if not os.path.exists(directory):
+        return None
+
+    for filename in os.listdir(directory):
+        # This regex looks for 1 or more digits in the filename
+        match = re.search(r'(\d+)', filename)
+        
+        if match:
+            # Extract the matched digits, convert to integer, and add to our list
+            # Converting to int automatically turns "0002" into 2
+            numbers.append(int(match.group(1)))
+            
+    # Return the maximum number found, or None if the list is empty
+    return max(numbers) if numbers else None
 
 # --- CONFIGURATION ---
 # Change this to play different levels. Format: SuperMarioBros-<World>-<Stage>-v0
@@ -12,6 +32,11 @@ output_dir = "mario_dataset/human_play_images"
 save_interval = 30 # Saves an image every 30 frames (0.5 seconds)
 
 output_dir = os.path.join(output_dir, level_to_play)
+saved_count = 0
+
+if os.path.isdir(output_dir):
+    saved_count = get_max_file_number(output_dir) + 1
+
 os.makedirs(output_dir, exist_ok=True)
 
 
@@ -60,7 +85,6 @@ clock = pygame.time.Clock()
 state = env.reset()
 done = False
 frame_count = 0
-saved_count = 0
 running = True
 
 print(f"Starting {level_to_play}! Close the Pygame window to stop and save.")
