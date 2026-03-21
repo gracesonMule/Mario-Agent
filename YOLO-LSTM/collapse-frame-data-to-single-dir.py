@@ -4,9 +4,16 @@ import shutil
 
 def main():
     counter = 0
+    out = "unlabeled-frame-data"
+
+    # Check if the directory exists
+    if os.path.exists(out):
+        # Delete the directory and all its contents
+        shutil.rmtree(out)
+
     os.makedirs("unlabeled-frame-data", exist_ok=True)
     p = Path("mario_dataset/human_play_images")
-    out = "unlabeled-frame-data"
+    
     for dir in p.iterdir():
         for f in os.scandir(dir):
             if f.is_file():
