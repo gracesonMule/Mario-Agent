@@ -12,7 +12,7 @@ output_dir = "mario_dataset/human_play_images"
 save_interval = 30 # Saves an image every 30 frames (0.5 seconds)
 
 output_dir = os.path.join(output_dir, level_to_play)
-os.makedirs(output_dir, exist_ok=False)
+os.makedirs(output_dir, exist_ok=True)
 
 
 def get_action_from_keyboard():
