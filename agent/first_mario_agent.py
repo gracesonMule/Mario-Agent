@@ -3,6 +3,9 @@ import cv2
 from collections import deque
 import argparse
 import matplotlib.pyplot as plt
+import os
+import traceback
+import warnings
 
 import torch
 import torch.nn as nn
@@ -20,12 +23,13 @@ from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 
 import MarioCNN
 
+MOVING_AVG = 10000
 EPISODES = 5_000_000
-LR = 0.1
-LR_DECAY = 0.09
+LR = 0.0001
+LR_DECAY = 0.99
 
-STARTING_EPSILON = 1 
-MIN_EPSILON = 0.1 # Smallest possible value for Epsilon
+STARTING_EPSILON = 0.1 
+MIN_EPSILON = 0.005 # Smallest possible value for Epsilon
 EPSILON_DECAY = 0.99999975
 
 class FrameStackWrapper(gym.Wrapper):
@@ -124,6 +128,28 @@ class StuckPenaltyWrapper(gym.Wrapper):
                 
         return obs, reward, done, info
 
+class LinearSchedule:
+    def __init__(self, start_val, end_val, total_steps):
+        """
+        Linearly scales a value from start_val to end_val over total_steps.
+        """
+        self.start_val = start_val
+        self.end_val = end_val
+        self.total_steps = total_steps
+        self.current_step = 0
+
+    def value(self):
+        """Returns the current value based on the step count."""
+        # Calculate how far along we are (from 0.0 to 1.0)
+        fraction = min(float(self.current_step) / self.total_steps, 1.0)
+        
+        # Linearly interpolate between start and end
+        return self.start_val + fraction * (self.end_val - self.start_val)
+
+    def step(self):
+        """Increments the internal step counter."""
+        self.current_step += 1
+
 class MarioAgent:
     def __init__(self, action_space_size, model_path=None):
         self.action_space_size = action_space_size
@@ -154,14 +180,16 @@ class MarioAgent:
 
         # Load trained weights if you have them
         if model_path:
-            loaded_data = torch.load(model_path, map_location=self.device)
-            
+            warnings.filterwarnings("error")
+
             # Check if user loaded a full model object
-            if isinstance(loaded_data, nn.Module):
-                print("Detected full model object. Extracting state_dict...")
-                weights = loaded_data.state_dict()
-            else:
-                weights = loaded_data
+            try:
+                weights = torch.load(model_path, map_location=self.device, weights_only=True)
+            except UserWarning as e:
+                full_model = torch.load(model_path, map_location=self.device, weights_only=False)
+                weights = full_model.state_dict()
+                
+            warnings.resetwarnings()
                 
             self.net.load_state_dict(weights)
             self.target_net.load_state_dict(weights)
@@ -187,7 +215,7 @@ class MarioAgent:
         self.target_net.load_state_dict(self.net.state_dict())
         print(f"Target Network Synced at step {self.learn_step_counter}!")
 
-    def learn(self, states, actions, rewards, next_states, dones):
+    def learn(self, states, actions, rewards, next_states, dones, weights):
         states = torch.tensor(states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         next_states = torch.tensor(next_states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
         
@@ -197,29 +225,44 @@ class MarioAgent:
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
 
+        weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(self.device)
+
         # What did the ONLINE network predict?
         current_q = self.net(states).gather(1, actions)
 
         # --- What is the target value based on the TARGET network? ---
         with torch.no_grad():
-            # We ask the frozen target_net for the future value!
-            next_q = self.target_net(next_states).max(1)[0].unsqueeze(1)
+            # 1. Use the ONLINE network to choose the best action for the next state
+            best_actions_next = self.net(next_states).argmax(dim=1, keepdim=True)
             
+            # 2. Use the TARGET network to evaluate the Q-value of that specific action
+            next_q = self.target_net(next_states).gather(1, best_actions_next)
+                        
         target_q = rewards + (self.gamma * next_q * (1 - dones))
 
-        # Backpropagation (Only on the Online Network!)
-        loss = self.loss_fn(current_q, target_q)
+        # --- Calculate TD Error for Priorities ---
+        # We use .detach() to ensure we don't accidentally backpropagate through the priorities
+        td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+
+        # --- Weighted Backpropagation ---
+        # Change SmoothL1Loss to not reduce automatically
+        loss_fn = nn.SmoothL1Loss(reduction='none') 
+        elementwise_loss = loss_fn(current_q, target_q)
+
+        # Apply the Importance Sampling weights
+        loss = torch.mean(elementwise_loss * weights)
+
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         self.scheduler.step()
         
-        # --- Sync the Target Network periodically ---
         self.learn_step_counter += 1
         if self.learn_step_counter % self.sync_every == 0:
             self.sync_target_network()
             
-        return loss.item()
+        # Return the loss and the new priorities (adding epsilon so priority > 0)
+        return loss.item(), td_errors + 1e-5
 
     def act(self, observation):
         """Chooses an action based on Epsilon-Greedy exploration."""
@@ -243,45 +286,60 @@ class MarioAgent:
 
         return action_idx    
     
-class ReplayMemory:
-    def __init__(self, capacity):
-        # A deque is a double-ended queue. When it hits 'maxlen', 
-        # it automatically drops the oldest item to make room for the new one.
-        self.memory = deque(maxlen=capacity)
+class PrioritizedReplayMemory:
+    def __init__(self, capacity, alpha=0.6):
+        self.capacity = capacity
+        self.alpha = alpha
+        self.memory = []
+        # Pre-allocate numpy arrays for speed
+        self.priorities = np.zeros((capacity,), dtype=np.float32)
+        self.position = 0
 
     def push(self, state, action, reward, next_state, done):
-        """
-        Saves a single transition to the memory buffer.
-        """
-        # We store everything as raw data (ints, floats, and numpy arrays) to save RAM.
-        self.memory.append((state, action, reward, next_state, done))
-
-    def sample(self, batch_size):
-        """
-        Randomly grabs a batch of transitions to train the neural network.
-        """
-        # 1. Grab 'batch_size' number of random transitions
-        batch = random.sample(self.memory, batch_size)
+        """Saves a transition and assigns it the maximum known priority."""
+        max_prio = self.priorities.max() if self.memory else 1.0
         
-        # 2. 'Unzip' the batch. 
-        # This turns a list of tuples like [(s1, a1, r1...), (s2, a2, r2...)]
-        # into separate lists: states=[s1, s2], actions=[a1, a2], etc.
+        if len(self.memory) < self.capacity:
+            self.memory.append((state, action, reward, next_state, done))
+        else:
+            self.memory[self.position] = (state, action, reward, next_state, done)
+        
+        self.priorities[self.position] = max_prio
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size, beta=0.4):
+        """Samples a batch weighted by priority, returning IS weights and indices."""
+        if len(self.memory) == self.capacity:
+            prios = self.priorities
+        else:
+            prios = self.priorities[:len(self.memory)]
+            
+        # Calculate probabilities
+        probs = prios ** self.alpha
+        probs /= probs.sum()
+        
+        indices = np.random.choice(len(self.memory), batch_size, p=probs)
+        batch = [self.memory[idx] for idx in indices]
+        
+        # Calculate Importance Sampling weights
+        total = len(self.memory)
+        weights = (total * probs[indices]) ** (-beta)
+        weights /= weights.max() # Normalize for stability
+        
         states, actions, rewards, next_states, dones = zip(*batch)
         
-        # 3. Convert them to NumPy arrays for speed
-        states = np.array(states)
-        actions = np.array(actions)
-        rewards = np.array(rewards, dtype=np.float32)
-        next_states = np.array(next_states)
-        dones = np.array(dones, dtype=np.bool_)
-        
-        # 4. Return them so your training loop can convert them to PyTorch tensors
-        return states, actions, rewards, next_states, dones
+        return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), 
+                np.array(next_states), np.array(dones, dtype=np.bool_), 
+                indices, np.array(weights, dtype=np.float32))
+
+    def update_priorities(self, batch_indices, batch_priorities):
+        """Updates the priorities for the sampled batch after learning."""
+        for idx, prio in zip(batch_indices, batch_priorities):
+            self.priorities[idx] = prio
 
     def __len__(self):
-        """Allows us to check how full the memory is by calling len(memory)."""
         return len(self.memory)
-
+    
 class SkipFrame(gym.Wrapper):
     def __init__(self, env, skip=4):
         """Return only every `skip`-th frame"""
@@ -300,16 +358,16 @@ class SkipFrame(gym.Wrapper):
                 break
         return obs, total_reward, done, info
 
-def save_progress_plot(rewards, filename="mario_training_progress.png"):
+def save_progress_plot(rewards, ma, filename="mario_training_progress.png"):
     """Saves a line graph of the agent's rewards over time."""
     plt.figure(figsize=(10, 5))
     plt.plot(rewards, color='blue', label='Episode Reward')
     
-    # Add a trendline (Moving Average of the last 10 episodes)
-    if len(rewards) >= 10:
-        moving_avg = np.convolve(rewards, np.ones(10)/10, mode='valid')
+    # Add a trendline (Moving Average of the last x episodes)
+    if len(rewards) >= ma:
+        moving_avg = np.convolve(rewards, np.ones(ma)/ma, mode='valid')
         # Shift the moving average to align with the end of the graph
-        plt.plot(range(9, len(rewards)), moving_avg, color='orange', label='10-Episode Moving Avg', linewidth=2)
+        plt.plot(range(ma-1, len(rewards)), moving_avg, color='orange', label=f'{ma}-Episode Moving Avg', linewidth=2)
         
     plt.title("Mario Agent Training Progress")
     plt.xlabel("Episode")
@@ -321,12 +379,19 @@ def save_progress_plot(rewards, filename="mario_training_progress.png"):
     plt.savefig(filename)
     plt.close()
 
-def main(model_path):
+def main(model_path, outdir):
     seed = 486
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
+
+    if not os.path.exists(outdir):
+        os.makedirs(outdir)
+
+    model_outdir = os.path.join(outdir, "mario_cnn_model.pth")
+
+    weights_outdir = os.path.join(outdir, "mario_cnn_weights.pth")
 
     # Initialize the environment
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
@@ -349,7 +414,7 @@ def main(model_path):
     episodes = EPISODES
     
 # Initialize the memory buffer to hold the last 50,000 steps
-    memory = ReplayMemory(capacity=50000)
+    memory = PrioritizedReplayMemory(capacity=50000)
     batch_size = 32
     
     episode_rewards = []
@@ -357,6 +422,8 @@ def main(model_path):
 # --- Add a global step counter ---
     global_step = 0 
     
+    beta_schedule = LinearSchedule(start_val=0.4, end_val=1.0, total_steps=1_000_000)
+
     for ep in range(episodes):
         state = env.reset()
         done = False
@@ -372,31 +439,49 @@ def main(model_path):
             # --- Increment the step counter ---
             global_step += 1 
             
+            beta_schedule.step()
             # --- Only learn every 4 steps! ---
             if len(memory) >= batch_size and global_step % 4 == 0:
-                b_states, b_actions, b_rewards, b_next_states, b_dones = memory.sample(batch_size)
-                loss = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones)
+                # 1. Unpack the new indices and weights
+                current_beta = beta_schedule.value()
+                b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=current_beta)
+                
+                # 2. Pass weights to learn, and receive td_errors back
+                loss, td_errors = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones, b_weights)
+                
+                # 3. Update the buffer with the new priorities
+                memory.update_priorities(b_indices, td_errors)
 
         # --- Logging at the end of every episode ---
         episode_rewards.append(total_reward)
         
         print(f"Episode: {ep + 1} | Score: {total_reward} | Epsilon: {agent.exploration_rate:.4f}")
-        
-        # Every 10 episodes, save the model and update the graph
+
+        # Every 10 episodes, save the model
         if (ep + 1) % 10 == 0:
-            # 1. Save the PyTorch model weights
-            torch.save(agent.net, "mario_cnn_model.pth")
-            torch.save(agent.net.state_dict(), "mario_cnn_weights.pth")
+            # Save the PyTorch model weights
+            torch.save(agent.net, model_outdir)
+            torch.save(agent.net.state_dict(), weights_outdir)
             print("--> Model and weights saved to mario_cnn_weights.pth and mario_cnn_model.pth")
             
-            # 2. Update the progress graph
-            save_progress_plot(episode_rewards)
+            try:
+                # Update the progress graph
+                if outdir:
+                    file_path = os.path.join(outdir, "mario_training_progress.png")
+                else:
+                    file_path = "mario_training_progress.png"
+                save_progress_plot(rewards=episode_rewards, ma=MOVING_AVG, filename=file_path)
+            except:
+                print("If you're reading this it means I broke the graph function...")
+                traceback.print_exc()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Load model from path")
 
-    parser.add_argument('--path', default=None, help="Load model from path", required=False)
+    parser.add_argument('--loadpath', help="Path to load model or weights from.", default=None, required=False)
+    
+    parser.add_argument('--outdir', help="Directory to save model and weights to.", default=None, required=True)
 
     args = parser.parse_args()
 
-    main(model_path=args.path)
+    main(model_path=args.loadpath, outdir=args.outdir)

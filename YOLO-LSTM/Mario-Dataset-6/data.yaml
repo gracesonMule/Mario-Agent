@@ -1,0 +1,13 @@
+train: ../train/images
+val: ../valid/images
+test: ../test/images
+
+nc: 18
+names: ['0- big_mario', '1- brick_block', '10- koopa', '11- little_mario', '12- mushroom', '13- mystery_block', '14- pipe', '15- pipe_head', '16- shell', '17- undestructible_block', '2- coin', '3- empty_block', '4- fire_mario', '5- fireball', '6- flower', '7- goal_pole', '8- goomba', '9- hard_block']
+
+roboflow:
+  workspace: ethan-ortega-zqedq
+  project: mario-dataset
+  version: 6
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/ethan-ortega-zqedq/mario-dataset/dataset/6
