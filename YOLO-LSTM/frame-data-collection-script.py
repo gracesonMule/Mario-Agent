@@ -27,7 +27,7 @@ def get_max_file_number(directory):
 
 # --- CONFIGURATION ---
 # Change this to play different levels. Format: SuperMarioBros-<World>-<Stage>-v0
-level_to_play = 'SuperMarioBros-1-1-v0' 
+level_to_play = 'SuperMarioBros-1-2-v0' 
 output_dir = "mario_dataset/human_play_images"
 save_interval = 30 # Saves an image every 30 frames (0.5 seconds)
 

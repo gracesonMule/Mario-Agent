@@ -1,6 +1,6 @@
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import RIGHT_ONLY
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from gym.wrappers import RecordVideo
 import argparse
 import os
@@ -11,7 +11,7 @@ from first_mario_agent import MarioAgent, SkipFrame, GrayScaleResizeWrapper, Fra
 def watch_mario(inputdir):
     # 1. Initialize the environment identically to training
     env = gym_super_mario_bros.make('SuperMarioBros-v0')
-    env = JoypadSpace(env, RIGHT_ONLY)
+    env = JoypadSpace(env, COMPLEX_MOVEMENT)
 
     file_path = os.path.join(inputdir, 'mario_replays')
 
