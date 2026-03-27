@@ -1,0 +1,22 @@
+# custom_hyp.yaml
+# YOLOv8 Custom Hyperparameters for 2D Side-Scrolling Games
+
+# --- Disable Harmful Augmentations ---
+degrees: 0.0         # Image rotation (+/- deg). Disable: sprites don't rotate.
+perspective: 0.0     # 3D perspective skew. Disable: it's a flat 2D game.
+flipud: 0.0          # Flip up-down. Disable: gravity is constant.
+mixup: 0.0           # Image mixup. Disable: overlaying two game screens is too noisy.
+copy_paste: 0.0      # Segment copy-paste. Not needed for bounding boxes.
+
+# --- Keep Helpful Augmentations ---
+fliplr: 0.5          # Flip left-right (50% chance). Good because entities face both ways.
+scale: 0.5           # Scale (+/- gain). Good for simulating different zoom levels.
+translate: 0.1       # Translate (+/- fraction). Good for shifting sprites near the edges of the frame.
+mosaic: 1.0          # Image mosaic (probability). Excellent for training context.
+
+# --- Reduce Color Shifting (Optional but recommended) ---
+# Retro games have absolute hex colors, so heavy color shifting can confuse the model.
+# We lower these from their defaults to keep the colors more true to the game.
+hsv_h: 0.01          # Image HSV-Hue augmentation (fraction)
+hsv_s: 0.3           # Image HSV-Saturation augmentation (fraction)
+hsv_v: 0.3           # Image HSV-Value augmentation (fraction)
