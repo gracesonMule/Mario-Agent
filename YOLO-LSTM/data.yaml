@@ -1,5 +1,5 @@
 # You can use absolute or relative paths
-path: ./mario-yolo-dataset  # root dir
+path: ./mario-yolo-dataset_v2 # root dir
 train: images/train # train images (relative to 'path')
 val: images/val     # val images (relative to 'path')
 
