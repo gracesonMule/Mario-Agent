@@ -8,7 +8,7 @@ results = model.train(
     cfg='custom_hyp.yaml',
     epochs=100_000, 
     imgsz=640, 
-    batch=32,
+    batch=64,
     device=0 # Uses your primary GPU. Use 'cpu' if no GPU is available.
 )
 
