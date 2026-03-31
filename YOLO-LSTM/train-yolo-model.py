@@ -4,7 +4,7 @@ model = YOLO('yolov8n.pt')
 
 # Train the model
 results = model.train(
-    data='data.yaml', 
+    data='synth-data.yaml', 
     cfg='custom_hyp.yaml',
     epochs=100_000, 
     imgsz=640, 
