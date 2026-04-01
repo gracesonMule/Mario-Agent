@@ -6,9 +6,9 @@ model = YOLO('yolov8n.pt')
 results = model.train(
     data='synth-data.yaml', 
     cfg='custom_hyp.yaml',
-    epochs=100, 
+    epochs=200, 
     imgsz=640, 
-    batch=16,
+    batch=32,
     workers=4,
     device=0 # Uses your primary GPU. Use 'cpu' if no GPU is available.
 )
