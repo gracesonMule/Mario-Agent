@@ -6,7 +6,7 @@ from ultralytics import YOLO
 
 # 1. Load your trained model
 # Point this to the best.pt file from your most recent training run
-model = YOLO('runs/detect/train/weights/best.pt')
+model = YOLO('runs/detect/train5/weights/best.pt')
 
 # 2. Initialize the Mario Environment
 env = gym_super_mario_bros.make('SuperMarioBros-v0')
