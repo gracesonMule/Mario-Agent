@@ -6,7 +6,7 @@ from ultralytics import YOLO
 
 # 1. Load your trained model
 # Point this to the best.pt file from your most recent training run
-model = YOLO('runs/detect/train5/weights/best.pt')
+model = YOLO('runs/detect/train6/weights/best.pt')
 
 # 2. Initialize the Mario Environment
 env = gym_super_mario_bros.make('SuperMarioBros-v0')
@@ -25,17 +25,23 @@ while not done:
     
     # 4. Step the environment forward (Gym 0.21.0 format)
     state, reward, done, info = env.step(action)
-    
+
     # 5. Fix the color space (RGB to BGR)
-    frame_bgr = cv2.cvtColor(state, cv2.COLOR_RGB2BGR)
-    
+    full_frame_bgr = cv2.cvtColor(state, cv2.COLOR_RGB2BGR)
+
+    masked_input = full_frame_bgr.copy()
+    masked_input[0:31, :] = (0, 0, 0)   # Paint top 31 rows black
+    masked_input[224:240, :] = (0, 0, 0) # Paint bottom 16 rows black
+
+
     # 6. Run YOLO inference directly on the numpy array
     # verbose=False stops YOLO from printing to the terminal every single frame
-    results = model(frame_bgr, verbose=False)
-    
+    results = model(masked_input, verbose=False)
+
+
     # 7. Draw the bounding boxes
     # results[0].plot() automatically draws the boxes, labels, and confidences on the frame
-    annotated_frame = results[0].plot()
+    annotated_frame = results[0].plot(img=full_frame_bgr)
     
     # 8. Scale up the video window (Native NES resolution is tiny: 256x240)
     display_frame = cv2.resize(annotated_frame, (768, 720), interpolation=cv2.INTER_NEAREST)
