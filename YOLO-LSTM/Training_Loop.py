@@ -19,18 +19,22 @@ import gym
 from gym.spaces import Box
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
+from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
 
-import MarioCNN
+from YoloLSTMNN import MarioYOLOLSTMNN
+from ultralytics import YOLO
 
-MOVING_AVG = 10000
+TRAINED_YOLO_MODEL = "train6"
+NUM_FRAMES_FOR_YOLO = 4
+
+MOVING_AVG = 100
 EPISODES = 5_000_000
 LR = 0.0001
 LR_DECAY = 0.99
 
-STARTING_EPSILON = 0.1 
+STARTING_EPSILON = 0.5
 MIN_EPSILON = 0.005 # Smallest possible value for Epsilon
-EPSILON_DECAY = 0.99999975
+EPSILON_DECAY_STEPS = 1_000_000
 
 # --- TRAINING LEVELS CONFIGURATION ---
 # Easily modify this list to train on different levels
@@ -46,68 +50,54 @@ TRAINING_LEVELS = [
 ]
 CHECKPOINT_INTERVAL = 2 * len(TRAINING_LEVELS) # Should be a multiple of levels trained on
 
-class FrameStackWrapper(gym.Wrapper):
-    def __init__(self, env, num_frames=4):
-        super().__init__(env)
-        self.num_frames = num_frames
-        
-        # A deque automatically pushes out the oldest frame when a new one is added
-        self.frames = deque(maxlen=num_frames)
-        
-        # We need to update the observation space so the agent knows what to expect
-        # It changes from (84, 84, 1) to (84, 84, 4)
-        old_space = env.observation_space
-        self.observation_space = Box(
-            low=np.repeat(old_space.low, num_frames, axis=-1),
-            high=np.repeat(old_space.high, num_frames, axis=-1),
-            dtype=old_space.dtype
-        )
 
-    def reset(self):
-        """When the game resets, we fill the stack with 4 copies of the starting frame."""
-        obs = self.env.reset()
-        for _ in range(self.num_frames):
-            self.frames.append(obs)
-        return self._get_obs()
+# Update this to match your trained YOLO model's class count.
+NUM_YOLO_CLASSES = 37
 
-    def step(self, action):
-        """Every time we take a step, add the new frame to the stack."""
-        obs, reward, done, info = self.env.step(action)
-        self.frames.append(obs)
-        return self._get_obs(), reward, done, info
+MAX_OBJECTS = 30 
+# One-hot class vector + 4 normalized bbox values (x_center, y_center, width, height)
+FEATURES_PER_OBJ = NUM_YOLO_CLASSES + 4
+INPUT_SIZE = MAX_OBJECTS * FEATURES_PER_OBJ 
 
-    def _get_obs(self):
-        """Concatenates our 4 separate (84, 84, 1) frames into a single (84, 84, 4) block."""
-        return np.concatenate(list(self.frames), axis=-1)
+# Define our fixed tensor dimensions
+INPUT_SIZE = MAX_OBJECTS * FEATURES_PER_OBJ # Total size of our 1D vector (50)
 
-class GrayScaleResizeWrapper(gym.ObservationWrapper):
-    def __init__(self, env, shape=(84, 84)):
-        super().__init__(env)
-        self.shape = shape
-        
-        # Update the environment's observation space to expect an 84x84 image with 1 color channel (grayscale)
-        self.observation_space = Box(
-            low=0, 
-            high=255, 
-            shape=(self.shape[0], self.shape[1], 1), 
-            dtype=np.uint8
-        )
 
-    def observation(self, obs):
-        """
-        This method automatically intercepts the frame every time env.step() is called.
-        """
-        # 1. Convert from RGB to Grayscale
-        gray = cv2.cvtColor(obs, cv2.COLOR_RGB2GRAY)
-        
-        # 2. Resize the image to 84x84
-        resized = cv2.resize(gray, self.shape, interpolation=cv2.INTER_AREA)
-        
-        # 3. Add the channel dimension back so the shape is (84, 84, 1)
-        # Neural networks generally expect that channel dimension!
-        final_obs = np.expand_dims(resized, axis=-1)
-        
-        return final_obs
+
+def yolo_to_lstm_vector(results):
+    """Converts a YOLO Results object into a fixed-size 1D numpy array.
+
+    Each detected object becomes a vector of length FEATURES_PER_OBJ:
+        [one_hot_class (NUM_YOLO_CLASSES), x_center, y_center, width, height]
+    Undetected object slots remain all zeros.
+
+    """
+    frame_features = np.zeros((MAX_OBJECTS, FEATURES_PER_OBJ), dtype=np.float32)
+ 
+    boxes = results[0].boxes
+    num_detected = min(len(boxes), MAX_OBJECTS)
+ 
+    if num_detected > 0:
+        classes = boxes.cls[:num_detected].cpu().numpy().astype(int)
+        coords = boxes.xywh[:num_detected].cpu().numpy()
+ 
+        for i in range(num_detected):
+            # One-hot encode the class ID
+            one_hot = np.zeros(NUM_YOLO_CLASSES, dtype=np.float32)
+            cls_id = classes[i]
+            if 0 <= cls_id < NUM_YOLO_CLASSES:
+                one_hot[cls_id] = 1.0
+ 
+            # Normalize bounding box coordinates to [0, 1]
+            x_norm = coords[i][0] / 256.0
+            y_norm = coords[i][1] / 240.0
+            w_norm = coords[i][2] / 256.0
+            h_norm = coords[i][3] / 240.0
+ 
+            # Concatenate: [one_hot..., x, y, w, h]
+            frame_features[i] = np.concatenate([one_hot, [x_norm, y_norm, w_norm, h_norm]])
+ 
+    return frame_features.flatten()
 
 class StuckPenaltyWrapper(gym.Wrapper):
     def __init__(self, env, max_steps_stuck=25, penalty=-15.0):
@@ -141,6 +131,67 @@ class StuckPenaltyWrapper(gym.Wrapper):
                 done = True  # Instantly kill the episode so we don't waste training time!
                 
         return obs, reward, done, info
+
+class YoloObservationWrapper(gym.ObservationWrapper):
+    def __init__(self, env, yolo_model):
+        super().__init__(env)
+        self.yolo_model = yolo_model
+        
+        # Update the environment's observation space to expect a 1D vector of size 50
+        self.observation_space = Box(
+            low=0.0, 
+            high=1.0, 
+            shape=(INPUT_SIZE,), 
+            dtype=np.float32
+        )
+
+    def observation(self, obs):
+        """Intercept the raw RGB frame, mask UI, pass it to YOLO, and return the 1D vector."""
+        
+        # 1. Convert to BGR (matching your script's color format for YOLO)
+        frame_bgr = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
+        
+        # 2. Create a copy to mask so we don't alter the underlying environment frame
+        masked_input = frame_bgr.copy()
+        
+        # 3. Apply UI Masking for YOLO
+        masked_input[0:31, :] = (0, 0, 0)     # Mask top score/time UI
+        masked_input[224:240, :] = (0, 0, 0)  # Mask bottom boundary/UI
+        
+        # 4. Run YOLO on the masked input
+        results = self.yolo_model(masked_input, verbose=False)
+        
+        # 5. Convert bounding boxes to the 1D vector for the LSTM
+        return yolo_to_lstm_vector(results)
+    
+class VectorFrameStackWrapper(gym.Wrapper):
+    def __init__(self, env, num_frames=NUM_FRAMES_FOR_YOLO):
+        super().__init__(env)
+        self.num_frames = num_frames
+        self.frames = deque(maxlen=num_frames)
+        
+        # Update space to represent a sequence of vectors: shape (4, 50)
+        old_space = env.observation_space
+        self.observation_space = Box(
+            low=np.repeat(old_space.low[np.newaxis, ...], num_frames, axis=0),
+            high=np.repeat(old_space.high[np.newaxis, ...], num_frames, axis=0),
+            dtype=old_space.dtype
+        )
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        for _ in range(self.num_frames):
+            self.frames.append(obs)
+        return self._get_obs()
+
+    def step(self, action):
+        obs, reward, done, info = self.env.step(action)
+        self.frames.append(obs)
+        return self._get_obs(), reward, done, info
+
+    def _get_obs(self):
+        """Stacks the 1D arrays into a 2D array of shape (num_frames, 50)."""
+        return np.stack(list(self.frames), axis=0)
 
 class LinearSchedule:
     def __init__(self, start_val, end_val, total_steps):
@@ -179,11 +230,9 @@ class MarioAgent:
             self.device = torch.device("cpu")
             print("Using CPU...\n")
 
-        # It needs to know it is receiving 4 stacked frames and outputting 7 possible actions
-        self.net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
-
-        # target network (frozen judge)
-        self.target_net = MarioCNN.MarioCNN(input_shape=(4, 84, 84), num_actions=action_space_size).to(self.device)
+        # Initialize the LSTM network. Input shape is (num_frames, vector_size) -> (NUM_FRAMES_FOR_YOLO, 50)
+        self.net = MarioYOLOLSTMNN(input_shape=(NUM_FRAMES_FOR_YOLO, INPUT_SIZE), num_actions=action_space_size).to(self.device)
+        self.target_net = MarioYOLOLSTMNN(input_shape=(NUM_FRAMES_FOR_YOLO, INPUT_SIZE), num_actions=action_space_size).to(self.device)
 
         # Clone the starting weights so they match perfectly
         self.target_net.load_state_dict(self.net.state_dict())
@@ -215,14 +264,20 @@ class MarioAgent:
         self.loss_fn = nn.SmoothL1Loss()
         self.gamma = 0.99
 
-        # Epsilon-Greedy parameters
-        self.exploration_rate = STARTING_EPSILON
-        self.exploration_rate_min = MIN_EPSILON
-        self.exploration_rate_decay = EPSILON_DECAY
+        self.epsilon_schedule = LinearSchedule(
+            start_val=STARTING_EPSILON,
+            end_val=MIN_EPSILON,
+            total_steps=EPSILON_DECAY_STEPS
+        )
 
         # --- Sync Tracker ---
         self.learn_step_counter = 0      # Tracks how many times learn() is called
         self.sync_every = 10000          # How often to copy weights to the target network
+
+    @property
+    def exploration_rate(self):
+        """Current epsilon value, driven by the linear schedule."""
+        return self.epsilon_schedule.value()
 
     def sync_target_network(self):
         """Copies the weights from the online network to the target network."""
@@ -230,15 +285,12 @@ class MarioAgent:
         print(f"Target Network Synced at step {self.learn_step_counter}!")
 
     def learn(self, states, actions, rewards, next_states, dones, weights):
-        states = torch.tensor(states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
-        next_states = torch.tensor(next_states, dtype=torch.float32).permute(0, 3, 1, 2) / 255.0
+        states = torch.tensor(states, dtype=torch.float32).to(self.device)
+        next_states = torch.tensor(next_states, dtype=torch.float32).to(self.device)
         
-        states = states.to(self.device)
-        next_states = next_states.to(self.device)
         actions = torch.tensor(actions, dtype=torch.int64).unsqueeze(1).to(self.device)
         rewards = torch.tensor(rewards, dtype=torch.float32).unsqueeze(1).to(self.device)
         dones = torch.tensor(dones, dtype=torch.float32).unsqueeze(1).to(self.device)
-
         weights = torch.tensor(weights, dtype=torch.float32).unsqueeze(1).to(self.device)
 
         # What did the ONLINE network predict?
@@ -256,7 +308,7 @@ class MarioAgent:
 
         # --- Calculate TD Error for Priorities ---
         # We use .detach() to ensure we don't accidentally backpropagate through the priorities
-        td_errors = torch.abs(current_q - target_q).detach().cpu().numpy()
+        td_errors = torch.abs(current_q - target_q).detach().cpu().numpy().squeeze(axis=1)
 
         # --- Weighted Backpropagation ---
         # Change SmoothL1Loss to not reduce automatically
@@ -269,7 +321,6 @@ class MarioAgent:
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-        self.scheduler.step()
         
         self.learn_step_counter += 1
         if self.learn_step_counter % self.sync_every == 0:
@@ -284,19 +335,14 @@ class MarioAgent:
             # EXPLORE
             action_idx = np.random.randint(self.action_space_size)
         else:
-            # EXPLOIT: Use CNN
-            state_tensor = torch.tensor(observation, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0) / 255.0
-            state_tensor = state_tensor.to(self.device)
+            # EXPLOIT: Use YOLO-LSTM
+            state_tensor = torch.tensor(observation, dtype=torch.float32).unsqueeze(0).to(self.device)
             
-            self.net.eval() # Turn off Dropout for predicting
+            self.net.eval()
             with torch.no_grad():
                 action_values = self.net(state_tensor)
             action_idx = torch.argmax(action_values, dim=1).item()
-            self.net.train() # Turn Dropout back on for learning
-
-        # Decay Epsilon
-        self.exploration_rate *= self.exploration_rate_decay
-        self.exploration_rate = max(self.exploration_rate_min, self.exploration_rate)
+            self.net.train()
 
         return action_idx    
     
@@ -332,7 +378,7 @@ class PrioritizedReplayMemory:
         probs = prios ** self.alpha
         probs /= probs.sum()
         
-        indices = np.random.choice(len(self.memory), batch_size, p=probs)
+        indices = np.random.choice(len(self.memory), batch_size, p=probs, replace=False)
         batch = [self.memory[idx] for idx in indices]
         
         # Calculate Importance Sampling weights
@@ -420,27 +466,28 @@ def main(model_path, outdir):
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
 
     if not os.path.exists(outdir):
         os.makedirs(outdir)
 
-    model_outdir = os.path.join(outdir, "mario_cnn_model.pth")
-    weights_outdir = os.path.join(outdir, "mario_cnn_weights.pth")
+    model_outdir = os.path.join(outdir, "mario_lstm_model.pth")
+    weights_outdir = os.path.join(outdir, "mario_lstm_weights.pth")
+
+    yolo_model = YOLO(f"runs/detect/{TRAINED_YOLO_MODEL}/weights/best.pt")
 
     # --- Create a wrapper function to initialize level environments ---
-    def create_level_env(level_name):
+    def create_level_env(level_name, yolo_instance):
         env = gym_super_mario_bros.make(level_name)
-        env = JoypadSpace(env, COMPLEX_MOVEMENT)
+        env = JoypadSpace(env, SIMPLE_MOVEMENT)
         env = SkipFrame(env, skip=4)
         env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=-15.0)
-        env = GrayScaleResizeWrapper(env, shape=(84, 84))
-        env = FrameStackWrapper(env, num_frames=4)
+        env = YoloObservationWrapper(env, yolo_model=yolo_instance) # Replaces Grayscale
+        env = VectorFrameStackWrapper(env, num_frames=NUM_FRAMES_FOR_YOLO)
         return env
 
     # Initialize environments for all levels
     print(f"Initializing {len(TRAINING_LEVELS)} training levels...")
-    level_envs = {level: create_level_env(level) for level in TRAINING_LEVELS}
+    level_envs = {level: create_level_env(level, yolo_model) for level in TRAINING_LEVELS}
     print(f"Levels initialized: {TRAINING_LEVELS}\n")
 
     # Instantiate your agent (use the action space from the first level - all should be the same)
@@ -455,6 +502,9 @@ def main(model_path, outdir):
     epoch_count = 0
     global_step = 0
     
+    # Step the epsilon schedule on global_step (linear decay)
+    agent.epsilon_schedule.step()
+
     beta_schedule = LinearSchedule(start_val=0.4, end_val=1.0, total_steps=1_000_000)
 
     episodes = EPISODES
@@ -491,6 +541,8 @@ def main(model_path, outdir):
             level_scores[level_name].append(total_reward)
             epoch_count += 1
             
+            agent.scheduler.step()
+
             print(f"Episode: {ep:7d} | Level: {level_name:30s} | Score: {total_reward:8.1f} | Epsilon: {agent.exploration_rate:.6f}")
 
         # --- Report statistics every CHECKPOINT_INTERVAL epochs ---

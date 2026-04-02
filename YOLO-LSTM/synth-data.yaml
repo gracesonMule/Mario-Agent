@@ -1,0 +1,45 @@
+# You can use absolute or relative paths
+path: /home/grace/Desktop/sta486c/synth-mario-yolo-dataset # root dir
+train: images/train # train images (relative to 'path')
+val: images/val     # val images (relative to 'path')
+
+# Classes
+names:
+  0: blank-block
+  1: blooper
+  2: bowser
+  3: bowser-fire
+  4: brick-block
+  5: bullet-bill
+  6: bullet-bill-launcher
+  7: buzzy-beetle
+  8: cheep-cheep
+  9: coin
+  10: coral
+  11: fire-flower
+  12: fire-mario
+  13: fire-ball
+  14: Goomba
+  15: hammer
+  16: hammer-bro
+  17: indestructible-block1
+  18: indestructible-block2
+  19: indestructible-block3
+  20: koopa-troopa
+  21: koopa-paratroopa
+  22: koopashell
+  23: lakitu
+  24: mario
+  25: moving-platform
+  26: mystery-block
+  27: one-way1
+  28: one-way2
+  29: pipe-body
+  30: pipe-head
+  31: piranha
+  32: spiny
+  33: spring
+  34: super-mario
+  35: super-mushroom
+  36: super-star
+  
