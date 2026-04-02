@@ -1,63 +1,115 @@
 import cv2
 import gym_super_mario_bros
 from nes_py.wrappers import JoypadSpace
-from gym_super_mario_bros.actions import SIMPLE_MOVEMENT
+from gym_super_mario_bros.actions import COMPLEX_MOVEMENT
 from ultralytics import YOLO
+from pynput import keyboard
 
-# 1. Load your trained model
-# Point this to the best.pt file from your most recent training run
+# --- 1. KEYBOARD HANDLER ---
+# Tracks whether a key is currently being held down
+key_state = {'left': False, 'right': False, 'down': False, 'A': False, 'B': False}
+
+def on_press(key):
+    try:
+        if key.char == 'a': key_state['left'] = True
+        if key.char == 'd': key_state['right'] = True
+        if key.char == 's': key_state['down'] = True
+    except AttributeError:
+        # Handle special keys (arrows, space, shift)
+        if key == keyboard.Key.left: key_state['left'] = True
+        if key == keyboard.Key.right: key_state['right'] = True
+        if key == keyboard.Key.down: key_state['down'] = True
+        if key == keyboard.Key.space: key_state['A'] = True
+        if key in [keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r]: 
+            key_state['B'] = True
+
+def on_release(key):
+    try:
+        if key.char == 'a': key_state['left'] = False
+        if key.char == 'd': key_state['right'] = False
+        if key.char == 's': key_state['down'] = False
+    except AttributeError:
+        if key == keyboard.Key.left: key_state['left'] = False
+        if key == keyboard.Key.right: key_state['right'] = False
+        if key == keyboard.Key.down: key_state['down'] = False
+        if key == keyboard.Key.space: key_state['A'] = False
+        if key in [keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r]: 
+            key_state['B'] = False
+
+# Start listening to the keyboard in the background
+listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+listener.start()
+
+def get_mario_action():
+    """Maps the current physical keyboard state to the correct Gym Action Integer."""
+    if key_state['right']:
+        if key_state['A'] and key_state['B']: return 4 # Right + Jump + Run
+        if key_state['A']: return 2                    # Right + Jump
+        if key_state['B']: return 3                    # Right + Run
+        return 1                                       # Right
+    elif key_state['left']:
+        if key_state['A'] and key_state['B']: return 9 # Left + Jump + Run
+        if key_state['A']: return 7                    # Left + Jump
+        if key_state['B']: return 8                    # Left + Run
+        return 6                                       # Left
+    elif key_state['down']:
+        return 10                                      # Duck
+    elif key_state['A']:
+        return 5                                       # Jump in place
+    return 0                                           # NOOP (Do nothing)
+
+
+# --- 2. YOLO AND ENV SETUP ---
 model = YOLO('runs/detect/train6/weights/best.pt')
 
-# 2. Initialize the Mario Environment
 env = gym_super_mario_bros.make('SuperMarioBros-v0')
-env = JoypadSpace(env, SIMPLE_MOVEMENT) # Limits actions to standard D-pad + jump
+env = JoypadSpace(env, COMPLEX_MOVEMENT) # Upgraded to allow backwards jumping
 
 state = env.reset()
 done = False
 
-print("Starting Mario... Press 'q' in the video window to quit.")
+print("--- CONTROLS ---")
+print("Move: A/D or Left/Right Arrows")
+print("Jump: Spacebar")
+print("Run/Fire: Shift")
+print("Quit: Press 'q' in the video window")
+print("----------------")
 
+# --- 3. THE GAME LOOP ---
 while not done:
-    # 3. Choose an action
-    # Currently taking random actions. You can easily plug this right into 
-    # the decision loop of your RL agent instead of sampling the action space.
-    action = env.action_space.sample()
+    # Get human input
+    action = get_mario_action()
     
-    # 4. Step the environment forward (Gym 0.21.0 format)
+    # Step environment
     state, reward, done, info = env.step(action)
-
-    # 5. Fix the color space (RGB to BGR)
+    
+    # Fix colors
     full_frame_bgr = cv2.cvtColor(state, cv2.COLOR_RGB2BGR)
-
     masked_input = full_frame_bgr.copy()
-    masked_input[0:31, :] = (0, 0, 0)   # Paint top 31 rows black
-    masked_input[224:240, :] = (0, 0, 0) # Paint bottom 16 rows black
-
-
-    # 6. Run YOLO inference directly on the numpy array
-    # verbose=False stops YOLO from printing to the terminal every single frame
+    
+    # Apply UI Masking for YOLO
+    masked_input[0:31, :] = (0, 0, 0)   
+    masked_input[224:240, :] = (0, 0, 0) 
+    
+    # Run YOLO on masked input
     results = model(masked_input, verbose=False)
-
-
-    # 7. Draw the bounding boxes
-    # results[0].plot() automatically draws the boxes, labels, and confidences on the frame
+    
+    # Draw boxes on the unmasked frame
     annotated_frame = results[0].plot(img=full_frame_bgr)
     
-    # 8. Scale up the video window (Native NES resolution is tiny: 256x240)
+    # Scale up for visibility
     display_frame = cv2.resize(annotated_frame, (768, 720), interpolation=cv2.INTER_NEAREST)
     
-    # 9. Show the result
+    # Display the game
     cv2.imshow("Super Mario Bros - YOLO Real-Time", display_frame)
     
-    # 10. Check for the 'q' key to cleanly exit
+    # WaitKey is still required to actually render the OpenCV window and catch the quit command
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
     
-    # Reset the environment if Mario dies or finishes the level
     if done:
         state = env.reset()
-        done = False # Keep the loop running for the next life
+        done = False 
 
-# Clean up windows when finished
 env.close()
 cv2.destroyAllWindows()
