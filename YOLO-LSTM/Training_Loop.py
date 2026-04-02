@@ -32,7 +32,7 @@ EPISODES = 5_000_000
 LR = 0.0001
 LR_DECAY = 0.99
 
-STARTING_EPSILON = 1.0
+STARTING_EPSILON = 0.5
 MIN_EPSILON = 0.005 # Smallest possible value for Epsilon
 EPSILON_DECAY_STEPS = 1_000_000
 
@@ -40,56 +40,63 @@ EPSILON_DECAY_STEPS = 1_000_000
 # Easily modify this list to train on different levels
 TRAINING_LEVELS = [
     'SuperMarioBros-1-1-v0',
-    # 'SuperMarioBros-1-2-v0',
-    # 'SuperMarioBros-2-1-v0',
-    # 'SuperMarioBros-2-2-v0',
-    # 'SuperMarioBros-2-4-v0',
-    # 'SuperMarioBros-4-3-v0',
-    # 'SuperMarioBros-8-2-v0',
-    # 'SuperMarioBros-8-3-v0'
+    'SuperMarioBros-1-2-v0',
+    'SuperMarioBros-2-1-v0',
+    'SuperMarioBros-2-2-v0',
+    'SuperMarioBros-2-4-v0',
+    'SuperMarioBros-4-3-v0',
+    'SuperMarioBros-8-2-v0',
+    'SuperMarioBros-8-3-v0'
 ]
 CHECKPOINT_INTERVAL = 2 * len(TRAINING_LEVELS) # Should be a multiple of levels trained on
 
+
+# Update this to match your trained YOLO model's class count.
+NUM_YOLO_CLASSES = 37
+
+MAX_OBJECTS = 30 
+# One-hot class vector + 4 normalized bbox values (x_center, y_center, width, height)
+FEATURES_PER_OBJ = NUM_YOLO_CLASSES + 4
+INPUT_SIZE = MAX_OBJECTS * FEATURES_PER_OBJ 
+
 # Define our fixed tensor dimensions
-MAX_OBJECTS = 10         # The maximum number of sprites we will track per frame
-FEATURES_PER_OBJ = 5     # [class_id, x_center, y_center, width, height]
 INPUT_SIZE = MAX_OBJECTS * FEATURES_PER_OBJ # Total size of our 1D vector (50)
 
 
 
 def yolo_to_lstm_vector(results):
-    """Converts a YOLO Results object into a fixed-size 1D numpy array."""
-    # 1. Initialize an array of pure zeros
+    """Converts a YOLO Results object into a fixed-size 1D numpy array.
+
+    Each detected object becomes a vector of length FEATURES_PER_OBJ:
+        [one_hot_class (NUM_YOLO_CLASSES), x_center, y_center, width, height]
+    Undetected object slots remain all zeros.
+
+    """
     frame_features = np.zeros((MAX_OBJECTS, FEATURES_PER_OBJ), dtype=np.float32)
-
-    # 2. Extract the bounding box data
+ 
     boxes = results[0].boxes
-
-    # 3. Determine how many objects to process (cap it at MAX_OBJECTS)
     num_detected = min(len(boxes), MAX_OBJECTS)
-
+ 
     if num_detected > 0:
-
-        # Move tensors to CPU and convert to numpy for easier handling
-        classes = boxes.cls[:num_detected].cpu().numpy()
-
-        # Use xywh (center x, center y, width, height) instead of xyxy. 
-        # Neural networks usually learn better from center points and scales.
-        coords = boxes.xywh[:num_detected].cpu().numpy() 
-
-        # 4. Populate the array with the actual detections
+        classes = boxes.cls[:num_detected].cpu().numpy().astype(int)
+        coords = boxes.xywh[:num_detected].cpu().numpy()
+ 
         for i in range(num_detected):
-
-            # Normalizing coordinates between 0 and 1 is highly recommended for LSTMs!
-            # Assuming your game window is 256x240 (standard NES resolution)
+            # One-hot encode the class ID
+            one_hot = np.zeros(NUM_YOLO_CLASSES, dtype=np.float32)
+            cls_id = classes[i]
+            if 0 <= cls_id < NUM_YOLO_CLASSES:
+                one_hot[cls_id] = 1.0
+ 
+            # Normalize bounding box coordinates to [0, 1]
             x_norm = coords[i][0] / 256.0
             y_norm = coords[i][1] / 240.0
             w_norm = coords[i][2] / 256.0
             h_norm = coords[i][3] / 240.0
-
-            frame_features[i] = [classes[i], x_norm, y_norm, w_norm, h_norm]
-
-    # 5. Flatten the 2D array (10x5) into a 1D vector (size 50)
+ 
+            # Concatenate: [one_hot..., x, y, w, h]
+            frame_features[i] = np.concatenate([one_hot, [x_norm, y_norm, w_norm, h_norm]])
+ 
     return frame_features.flatten()
 
 class StuckPenaltyWrapper(gym.Wrapper):
@@ -371,7 +378,7 @@ class PrioritizedReplayMemory:
         probs = prios ** self.alpha
         probs /= probs.sum()
         
-        indices = np.random.choice(len(self.memory), batch_size, p=probs)
+        indices = np.random.choice(len(self.memory), batch_size, p=probs, replace=False)
         batch = [self.memory[idx] for idx in indices]
         
         # Calculate Importance Sampling weights
@@ -459,7 +466,6 @@ def main(model_path, outdir):
     random.seed(seed)
     torch.manual_seed(seed)
     np.random.seed(seed)
-    random.seed(seed)
 
     if not os.path.exists(outdir):
         os.makedirs(outdir)
