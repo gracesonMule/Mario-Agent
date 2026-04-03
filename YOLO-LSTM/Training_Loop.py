@@ -420,23 +420,28 @@ class SkipFrame(gym.Wrapper):
 
 def save_progress_plot(level_scores, ma, filename="mario_training_progress.png"):
     """
-    Saves a multi-level moving average plot.
-    Each level gets a thin line with a unique color.
-    Overall moving average is a thick line.
+    Saves a multi-level plot with both raw epoch scores and moving averages.
+    Raw scores are thin, lighter lines. Moving averages are thick, darker lines.
     """
     plt.figure(figsize=(14, 7))
     
     # Color palette for different levels
     colors = plt.cm.tab10(np.linspace(0, 1, len(TRAINING_LEVELS)))
     
-    # Plot moving average for each level
+    # Plot raw scores and moving average for each level
     for idx, level_name in enumerate(TRAINING_LEVELS):
         scores = np.array(level_scores[level_name])
+        epochs = range(len(scores))
+        
+        # Plot raw epoch scores (thin, light)
+        plt.plot(epochs, scores, color=colors[idx], label=f'{level_name} (Raw)', linewidth=1, alpha=0.3)
+        
+        # Plot moving average (thick, dark)
         if len(scores) >= ma:
             moving_avg = np.convolve(scores, np.ones(ma)/ma, mode='valid')
             # Shift to align with epoch numbers
-            epochs = range(ma - 1, len(scores))
-            plt.plot(epochs, moving_avg, color=colors[idx], label=f'{level_name} (MA)', linewidth=2.5, alpha=0.9)
+            ma_epochs = range(ma - 1, len(scores))
+            plt.plot(ma_epochs, moving_avg, color=colors[idx], label=f'{level_name} (MA)', linewidth=2.5, alpha=0.9)
     
     # Calculate and plot overall moving average per training cycle
     # Build per-cycle averages (average across levels for each cycle index)
@@ -446,15 +451,19 @@ def save_progress_plot(level_scores, ma, filename="mario_training_progress.png")
             np.mean([level_scores[level_name][i] for level_name in TRAINING_LEVELS])
             for i in range(min_len)
         ])
+        
+        # Plot overall raw scores
+        plt.plot(range(min_len), per_cycle_avg, color='black', linestyle='-', label='Overall (Raw)', linewidth=1, alpha=0.2)
+        
+        # Plot overall MA
         overall_ma = np.convolve(per_cycle_avg, np.ones(ma)/ma, mode='valid')
         epochs = range(ma - 1, min_len)
-        # Plot overall MA as solid black on top
-        plt.plot(epochs, overall_ma, color='black', linestyle='-', label='Overall Average (MA)', linewidth=3.5, alpha=0.95, zorder=100)
+        plt.plot(epochs, overall_ma, color='black', linestyle='-', label='Overall (MA)', linewidth=3.5, alpha=0.95, zorder=100)
     
-    plt.title("Mario Agent Training Progress - Moving Averages by Level")
+    plt.title("Mario Agent Training Progress - Epoch Scores vs Moving Averages")
     plt.xlabel(f"Episode (MA Window: {ma})")
     plt.ylabel("Total Reward")
-    plt.legend(loc='best', fontsize=9)
+    plt.legend(loc='best', fontsize=8)
     plt.grid(True, alpha=0.3)
     
     # Save and close
@@ -510,40 +519,41 @@ def main(model_path, outdir):
     episodes = EPISODES
     
     for ep in range(episodes):
-        # --- Play through each level in the training set ---
-        for level_name in TRAINING_LEVELS:
-            env = level_envs[level_name]
-            state = env.reset()
-            done = False
-            total_reward = 0
+        # --- Randomly sample one level for this epoch ---
+        level_name = random.choice(TRAINING_LEVELS)
+        env = level_envs[level_name]
+        state = env.reset()
+        done = False
+        total_reward = 0
+        
+        while not done:
+            action = agent.act(state)
+            next_state, reward, done, info = env.step(action)
+            memory.push(state, action, reward, next_state, done)
+            state = next_state
+            total_reward += reward
             
-            while not done:
-                action = agent.act(state)
-                next_state, reward, done, info = env.step(action)
-                memory.push(state, action, reward, next_state, done)
-                state = next_state
-                total_reward += reward
-                
-                # --- Increment the step counter ---
-                global_step += 1
-                
-                beta_schedule.step()
-                # --- Only learn every 4 steps! ---
-                if len(memory) >= batch_size and global_step % 4 == 0:
-                    current_beta = beta_schedule.value()
-                    b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=current_beta)
-                    
-                    loss, td_errors = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones, b_weights)
-                    
-                    memory.update_priorities(b_indices, td_errors)
-
-            # --- Log level score ---
-            level_scores[level_name].append(total_reward)
-            epoch_count += 1
+            # --- Increment the step counter ---
+            global_step += 1
             
-            agent.scheduler.step()
+            beta_schedule.step()
+            # --- Only learn every 4 steps! ---
+            if len(memory) >= batch_size and global_step % 4 == 0:
+                current_beta = beta_schedule.value()
+                b_states, b_actions, b_rewards, b_next_states, b_dones, b_indices, b_weights = memory.sample(batch_size, beta=current_beta)
+                
+                loss, td_errors = agent.learn(b_states, b_actions, b_rewards, b_next_states, b_dones, b_weights)
+                
+                memory.update_priorities(b_indices, td_errors)
 
-            print(f"Episode: {ep:7d} | Level: {level_name:30s} | Score: {total_reward:8.1f} | Epsilon: {agent.exploration_rate:.6f}")
+        # --- Log level score ---
+        level_scores[level_name].append(total_reward)
+        epoch_count += 1
+        
+        agent.scheduler.step()
+
+        print(f"Episode: {ep:7d} | Level: {level_name:30s} | Score: {total_reward:8.1f} | Epsilon: {agent.exploration_rate:.6f}")
+
 
         # --- Report statistics every CHECKPOINT_INTERVAL epochs ---
         if epoch_count % CHECKPOINT_INTERVAL == 0:
