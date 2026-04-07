@@ -60,6 +60,8 @@ CLIP_VLOSS = True              # Whether to clip the value loss
 ENT_COEF = 0.01                # Entropy bonus coefficient (encourages exploration)
 VF_COEF = 0.5                  # Value function loss coefficient
 MAX_GRAD_NORM = 0.5            # Gradient clipping
+REWARD_CLIP = 5.0              # Clamp rewards to [-REWARD_CLIP, REWARD_CLIP] (always applied as safety net)
+REWARD_BURN_IN = 2048          # Collect this many reward samples before enabling normalization
 ANNEAL_LR = True               # Linearly anneal LR to 0 over training
 NORM_ADV = True                # Normalize advantages within each minibatch
 
@@ -83,7 +85,7 @@ MOVING_AVG = 100               # Window for progress plot
 
 
 # ===========================================================================
-# YOLO Preprocessing
+# YOLO Preprocessing (unchanged from your code)
 # ===========================================================================
 def yolo_to_lstm_vector(results):
     """Converts a YOLO Results object into a fixed-size 1D numpy array."""
@@ -112,7 +114,7 @@ def yolo_to_lstm_vector(results):
 
 
 # ===========================================================================
-# Environment Wrappers
+# Environment Wrappers (unchanged from your code)
 # ===========================================================================
 class StuckPenaltyWrapper(gym.Wrapper):
     def __init__(self, env, max_steps_stuck=25, penalty=-15.0):
@@ -198,31 +200,61 @@ class SkipFrame(gym.Wrapper):
 
 
 # ===========================================================================
-# Reward normalization (running mean/std, common in PPO for stability)
+# Progress Plotting
+# ===========================================================================
+# ===========================================================================
+# Reward Normalization with Burn-in
 # ===========================================================================
 class RunningMeanStd:
-    """Welford's online algorithm for tracking mean/var of reward returns."""
-    def __init__(self):
+    """Welford's online algorithm with a burn-in period.
+
+    During burn-in (count < burn_in), scale() returns the raw value — no
+    normalization is applied. Once enough samples have been collected for a
+    stable variance estimate, scale() divides by the running std.
+
+    A safety clamp is always applied after normalization to catch outliers.
+    """
+
+    def __init__(self, burn_in=REWARD_BURN_IN, clip=REWARD_CLIP):
         self.mean = 0.0
         self.var = 1.0
-        self.count = 1e-4
+        self.count = 1e-4        # small epsilon avoids division by zero
+        self.burn_in = burn_in
+        self.clip = clip
 
-    def update(self, x):
-        batch_mean = np.mean(x)
-        batch_var = np.var(x)
-        batch_count = len(x) if hasattr(x, '__len__') else 1
-        self._update_from_moments(batch_mean, batch_var, batch_count)
+    @property
+    def is_warmed_up(self):
+        return self.count >= self.burn_in
 
-    def _update_from_moments(self, batch_mean, batch_var, batch_count):
-        delta = batch_mean - self.mean
-        total = self.count + batch_count
-        new_mean = self.mean + delta * batch_count / total
-        m_a = self.var * self.count
-        m_b = batch_var * batch_count
-        m2 = m_a + m_b + delta ** 2 * self.count * batch_count / total
-        self.mean = new_mean
-        self.var = m2 / total
-        self.count = total
+    def update(self, value):
+        """Update running stats with a single scalar reward."""
+        self.count += 1
+        delta = value - self.mean
+        self.mean += delta / self.count
+        delta2 = value - self.mean
+        self.var += (delta * delta2 - self.var) / self.count
+
+    def scale(self, value):
+        """Normalize a reward value.
+
+        Before burn-in:  just clamp.
+        After  burn-in:  divide by std, then clamp.
+        """
+        if self.is_warmed_up:
+            std = max(self.var ** 0.5, 1e-8)
+            value = value / std
+
+        return max(-self.clip, min(self.clip, value))
+
+    def state_dict(self):
+        """Serialize for checkpointing."""
+        return {'mean': self.mean, 'var': self.var, 'count': self.count}
+
+    def load_state_dict(self, d):
+        """Restore from checkpoint."""
+        self.mean = d['mean']
+        self.var = d['var']
+        self.count = d['count']
 
 
 # ===========================================================================
@@ -237,11 +269,11 @@ def save_progress_plot(level_scores, ma, filename="mario_training_progress.png")
         if len(scores) == 0:
             continue
         epochs = range(len(scores))
-        plt.plot(epochs, scores, color=colors[idx], linewidth=1, alpha=0.3)
+        plt.plot(epochs, scores, color=colors[idx], linewidth=1, alpha=0.4)
         if len(scores) >= ma:
             moving_avg = np.convolve(scores, np.ones(ma) / ma, mode='valid')
             ma_epochs = range(ma - 1, len(scores))
-            plt.plot(ma_epochs, moving_avg, color=colors[idx], label=f'{level_name}', linewidth=2.5, alpha=0.5)
+            plt.plot(ma_epochs, moving_avg, color=colors[idx], label=f'{level_name}', linewidth=2.5, alpha=0.9)
 
     plt.title("Mario PPO Training Progress")
     plt.xlabel(f"Episode per level (MA Window: {ma})")
@@ -311,9 +343,29 @@ def main(model_path, outdir):
             agent.load_state_dict(checkpoint['model_state_dict'])
         elif isinstance(checkpoint, dict):
             agent.load_state_dict(checkpoint)
-        print(f"Loaded weights from {model_path}\n")
+        print(f"Loaded weights from {model_path}")
 
     optimizer = optim.Adam(agent.parameters(), lr=LR, eps=1e-5)
+
+    # --- Restore optimizer state and training counters if resuming ---
+    episode_count = 0
+    global_step = 0
+    level_scores = {level: [] for level in TRAINING_LEVELS}
+
+    if model_path and isinstance(checkpoint, dict):
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            print("  Restored optimizer state (Adam momentum/variance)")
+        if 'global_step' in checkpoint:
+            global_step = checkpoint['global_step']
+            print(f"  Resuming from global_step {global_step:,}")
+        if 'episode_count' in checkpoint:
+            episode_count = checkpoint['episode_count']
+            print(f"  Resuming from episode {episode_count}")
+        if 'level_scores' in checkpoint:
+            level_scores = checkpoint['level_scores']
+            print(f"  Restored per-level score history")
+        print()
 
     # --- Rollout storage (pre-allocated tensors for NUM_STEPS) ---
     obs_buf = torch.zeros((NUM_STEPS, *obs_shape), dtype=torch.float32).to(device)
@@ -323,13 +375,17 @@ def main(model_path, outdir):
     done_buf = torch.zeros(NUM_STEPS, dtype=torch.float32).to(device)
     value_buf = torch.zeros(NUM_STEPS, dtype=torch.float32).to(device)
 
-    # --- Tracking ---
-    level_scores = {level: [] for level in TRAINING_LEVELS}
-    episode_count = 0
-    global_step = 0
+    # --- Derived schedule values ---
     num_updates = TOTAL_TIMESTEPS // NUM_STEPS
     minibatch_size = NUM_STEPS // NUM_MINIBATCHES
-    reward_rms = RunningMeanStd()
+    start_update = (global_step // NUM_STEPS) + 1  # Resume from correct update index
+    reward_rms = RunningMeanStd(burn_in=REWARD_BURN_IN, clip=REWARD_CLIP)
+
+    if model_path and isinstance(checkpoint, dict):
+        if 'reward_rms' in checkpoint:
+            reward_rms.load_state_dict(checkpoint['reward_rms'])
+            print(f"  Restored reward normalizer (count={reward_rms.count:.0f}, "
+                  f"warmed_up={reward_rms.is_warmed_up})")
 
     # --- Begin with a random level ---
     current_level = random.choice(TRAINING_LEVELS)
@@ -340,14 +396,17 @@ def main(model_path, outdir):
     done = False
 
     print(f"PPO Training | {TOTAL_TIMESTEPS:,} total steps | {num_updates} updates")
-    print(f"Rollout: {NUM_STEPS} steps | {NUM_MINIBATCHES} minibatches | {UPDATE_EPOCHS} epochs\n")
+    print(f"Rollout: {NUM_STEPS} steps | {NUM_MINIBATCHES} minibatches | {UPDATE_EPOCHS} epochs")
+    if start_update > 1:
+        print(f"Resuming from update {start_update} (step {global_step:,})")
+    print()
 
     start_time = time.time()
 
     try:
-        for update in range(1, num_updates + 1):
+        for update in range(start_update, num_updates + 1):
 
-            # --- Learning rate annealing ---
+            # --- Learning rate annealing (based on absolute position in training) ---
             if ANNEAL_LR:
                 frac = 1.0 - (update - 1) / num_updates
                 optimizer.param_groups[0]['lr'] = LR * frac
@@ -370,10 +429,9 @@ def main(model_path, outdir):
 
                 obs, reward, done, info = env.step(action.item())
 
-                # Reward scaling (optional but stabilizes training)
-                reward_rms.update(np.array([reward]))
-                scaled_reward = reward / (np.sqrt(reward_rms.var) + 1e-8)
-                reward_buf[step] = scaled_reward
+                # Update running reward stats, then normalize (clamp is always applied)
+                reward_rms.update(reward)
+                reward_buf[step] = reward_rms.scale(reward)
 
                 episode_reward += reward
 
@@ -401,7 +459,7 @@ def main(model_path, outdir):
                             sc = level_scores[ln]
                             if len(sc) > 0:
                                 recent = sc[-CHECKPOINT_INTERVAL:]
-                                print(f"  {ln:30s} | n={len(sc):5d} | Avg: {np.mean(recent):8.2f} | Max: {np.max(recent):8.2f}")
+                                print(f"  {ln:30s} | Total Times Played={len(sc):5d} | Avg: {np.mean(recent):8.2f} | Max: {np.max(recent):8.2f}") 
                         print("=" * 100 + "\n")
 
                         try:
@@ -418,6 +476,8 @@ def main(model_path, outdir):
                             'optimizer_state_dict': optimizer.state_dict(),
                             'global_step': global_step,
                             'episode_count': episode_count,
+                            'level_scores': level_scores,
+                            'reward_rms': reward_rms.state_dict(),
                         }, save_path)
                         print(f"--> Checkpoint saved at episode {episode_count}")
 
@@ -547,6 +607,8 @@ def main(model_path, outdir):
             'optimizer_state_dict': optimizer.state_dict(),
             'global_step': global_step,
             'episode_count': episode_count,
+            'level_scores': level_scores,
+            'reward_rms': reward_rms.state_dict(),
         }, save_path)
         print(f"Final model saved to {save_path}")
         print("Done.")
