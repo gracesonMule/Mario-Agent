@@ -152,10 +152,9 @@ class YoloObservationWrapper(gym.ObservationWrapper):
         masked_input = frame_bgr.copy()
         masked_input[0:31, :] = (0, 0, 0)
         masked_input[224:240, :] = (0, 0, 0)
-        results = self.yolo_model(masked_input, verbose=False, max_det=MAX_OBJECTS,
+        results = self.yolo_model(masked_input, verbose=False, max_det=100,
                                                                                     conf=0.35,
                                                                                     iou=0.5,
-                                                                                    max_det=100,
                                                                                     imgsz=256)
         return yolo_to_lstm_vector(results)
 
