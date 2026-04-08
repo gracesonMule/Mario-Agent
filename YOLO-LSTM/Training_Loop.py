@@ -61,7 +61,7 @@ ENT_COEF = 0.01                # Entropy bonus coefficient (encourages explorati
 VF_COEF = 0.25                 # Value function loss coefficient (reduced to prevent critic dominating shared gradients)
 MAX_GRAD_NORM = 0.5            # Gradient clipping
 REWARD_CLIP = 5.0              # Clamp rewards to [-REWARD_CLIP, REWARD_CLIP] (always applied as safety net)
-REWARD_BURN_IN = 2048          # Collect this many reward samples before enabling normalization
+RETURN_NORM_BURN_IN = 2048     # Return normalizer collects this many samples before activating
 ANNEAL_LR = True               # Linearly anneal LR to 0 over training
 NORM_ADV = True                # Normalize advantages within each minibatch
 
@@ -200,63 +200,8 @@ class SkipFrame(gym.Wrapper):
 
 
 # ===========================================================================
-# Progress Plotting
+# Return Normalization with Burn-in
 # ===========================================================================
-# ===========================================================================
-# Reward Normalization with Burn-in
-# ===========================================================================
-class RunningMeanStd:
-    """Welford's online algorithm with a burn-in period.
-
-    During burn-in (count < burn_in), scale() returns the raw value — no
-    normalization is applied. Once enough samples have been collected for a
-    stable variance estimate, scale() divides by the running std.
-
-    A safety clamp is always applied after normalization to catch outliers.
-    """
-
-    def __init__(self, burn_in=REWARD_BURN_IN, clip=REWARD_CLIP):
-        self.mean = 0.0
-        self.var = 1.0
-        self.count = 1e-4        # small epsilon avoids division by zero
-        self.burn_in = burn_in
-        self.clip = clip
-
-    @property
-    def is_warmed_up(self):
-        return self.count >= self.burn_in
-
-    def update(self, value):
-        """Update running stats with a single scalar reward."""
-        self.count += 1
-        delta = value - self.mean
-        self.mean += delta / self.count
-        delta2 = value - self.mean
-        self.var += (delta * delta2 - self.var) / self.count
-
-    def scale(self, value):
-        """Normalize a reward value.
-
-        Before burn-in:  just clamp.
-        After  burn-in:  divide by std, then clamp.
-        """
-        if self.is_warmed_up:
-            std = max(self.var ** 0.5, 1e-8)
-            value = value / std
-
-        return max(-self.clip, min(self.clip, value))
-
-    def state_dict(self):
-        """Serialize for checkpointing."""
-        return {'mean': self.mean, 'var': self.var, 'count': self.count}
-
-    def load_state_dict(self, d):
-        """Restore from checkpoint."""
-        self.mean = d['mean']
-        self.var = d['var']
-        self.count = d['count']
-
-
 class ReturnNormalizer:
     """Normalizes value function targets (returns) using running statistics.
 
@@ -265,7 +210,7 @@ class ReturnNormalizer:
     denormalized back to the original reward scale so that TD errors are
     computed correctly.
 
-    Uses the same burn-in pattern as RunningMeanStd: during burn-in the
+    Uses a burn-in pattern: during burn-in the
     normalizer is transparent (passes values through unchanged) while it
     accumulates a stable variance estimate.
     """
@@ -431,7 +376,12 @@ def main(model_path, outdir):
             episode_count = checkpoint['episode_count']
             print(f"  Resuming from episode {episode_count}")
         if 'level_scores' in checkpoint:
-            level_scores = checkpoint['level_scores']
+            saved_scores = checkpoint['level_scores']
+            # Merge: keep history for levels that are still in TRAINING_LEVELS,
+            # ignore old levels no longer trained, init new levels as empty
+            for level in TRAINING_LEVELS:
+                if level in saved_scores:
+                    level_scores[level] = saved_scores[level]
             print(f"  Restored per-level score history")
         print()
 
@@ -447,14 +397,9 @@ def main(model_path, outdir):
     num_updates = TOTAL_TIMESTEPS // NUM_STEPS
     minibatch_size = NUM_STEPS // NUM_MINIBATCHES
     start_update = (global_step // NUM_STEPS) + 1  # Resume from correct update index
-    reward_rms = RunningMeanStd(burn_in=REWARD_BURN_IN, clip=REWARD_CLIP)
-    return_normalizer = ReturnNormalizer(burn_in=REWARD_BURN_IN)
+    return_normalizer = ReturnNormalizer(burn_in=RETURN_NORM_BURN_IN)
 
     if model_path and isinstance(checkpoint, dict):
-        if 'reward_rms' in checkpoint:
-            reward_rms.load_state_dict(checkpoint['reward_rms'])
-            print(f"  Restored reward normalizer (count={reward_rms.count:.0f}, "
-                  f"warmed_up={reward_rms.is_warmed_up})")
         if 'return_normalizer' in checkpoint:
             return_normalizer.load_state_dict(checkpoint['return_normalizer'])
             print(f"  Restored return normalizer (count={return_normalizer.count:.0f}, "
@@ -475,6 +420,7 @@ def main(model_path, outdir):
     print()
 
     start_time = time.time()
+    steps_at_session_start = global_step  # For accurate sps calculation on resume
 
     try:
         for update in range(start_update, num_updates + 1):
@@ -502,9 +448,10 @@ def main(model_path, outdir):
 
                 obs, reward, done, info = env.step(action.item())
 
-                # Update running reward stats, then normalize (clamp is always applied)
-                reward_rms.update(reward)
-                reward_buf[step] = reward_rms.scale(reward)
+                # Safety clamp only — return normalizer handles scaling at the target level.
+                # Do NOT normalize per-step rewards; stacking reward + return normalization
+                # crushes variance and makes the critic trivially accurate but useless.
+                reward_buf[step] = max(-REWARD_CLIP, min(REWARD_CLIP, reward))
 
                 episode_reward += reward
 
@@ -524,7 +471,7 @@ def main(model_path, outdir):
                     # --- Checkpoint reporting ---
                     if episode_count % CHECKPOINT_INTERVAL == 0:
                         elapsed = time.time() - start_time
-                        sps = global_step / elapsed
+                        sps = (global_step - steps_at_session_start) / max(elapsed, 1e-8)
                         print("\n" + "=" * 100)
                         print(f"CHECKPOINT @ episode {episode_count} | step {global_step:,} | {sps:.0f} steps/sec")
                         print("=" * 100)
@@ -550,7 +497,6 @@ def main(model_path, outdir):
                             'global_step': global_step,
                             'episode_count': episode_count,
                             'level_scores': level_scores,
-                            'reward_rms': reward_rms.state_dict(),
                             'return_normalizer': return_normalizer.state_dict(),
                         }, save_path)
                         print(f"--> Checkpoint saved at episode {episode_count}")
@@ -669,7 +615,7 @@ def main(model_path, outdir):
             # --- Per-update logging ---
             if update % 10 == 0:
                 elapsed = time.time() - start_time
-                sps = global_step / elapsed
+                sps = (global_step - steps_at_session_start) / max(elapsed, 1e-8)
                 current_lr = optimizer.param_groups[0]['lr']
                 print(
                     f"update {update:5d}/{num_updates} | step {global_step:>10,} | "
@@ -695,7 +641,6 @@ def main(model_path, outdir):
             'global_step': global_step,
             'episode_count': episode_count,
             'level_scores': level_scores,
-            'reward_rms': reward_rms.state_dict(),
             'return_normalizer': return_normalizer.state_dict(),
         }, save_path)
         print(f"Final model saved to {save_path}")
