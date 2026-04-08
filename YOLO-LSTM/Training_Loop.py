@@ -58,7 +58,7 @@ GAE_LAMBDA = 0.95              # GAE lambda for advantage estimation
 CLIP_EPS = 0.2                 # PPO clipping parameter
 CLIP_VLOSS = True              # Whether to clip the value loss
 ENT_COEF = 0.01                # Entropy bonus coefficient (encourages exploration)
-VF_COEF = 0.5                  # Value function loss coefficient
+VF_COEF = 0.25                 # Value function loss coefficient (reduced to prevent critic dominating shared gradients)
 MAX_GRAD_NORM = 0.5            # Gradient clipping
 REWARD_CLIP = 5.0              # Clamp rewards to [-REWARD_CLIP, REWARD_CLIP] (always applied as safety net)
 REWARD_BURN_IN = 2048          # Collect this many reward samples before enabling normalization
@@ -152,10 +152,7 @@ class YoloObservationWrapper(gym.ObservationWrapper):
         masked_input = frame_bgr.copy()
         masked_input[0:31, :] = (0, 0, 0)
         masked_input[224:240, :] = (0, 0, 0)
-        results = self.yolo_model(masked_input, verbose=False, max_det=100,
-                                                                                    conf=0.35,
-                                                                                    iou=0.5,
-                                                                                    imgsz=256)
+        results = self.yolo_model(masked_input, verbose=False)
         return yolo_to_lstm_vector(results)
 
 
@@ -260,6 +257,74 @@ class RunningMeanStd:
         self.count = d['count']
 
 
+class ReturnNormalizer:
+    """Normalizes value function targets (returns) using running statistics.
+
+    The critic learns to predict in *normalized* space where targets hover
+    near 0 with unit variance.  During GAE, the critic's predictions are
+    denormalized back to the original reward scale so that TD errors are
+    computed correctly.
+
+    Uses the same burn-in pattern as RunningMeanStd: during burn-in the
+    normalizer is transparent (passes values through unchanged) while it
+    accumulates a stable variance estimate.
+    """
+
+    def __init__(self, burn_in=2048):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = 1e-4
+        self.burn_in = burn_in
+
+    @property
+    def is_warmed_up(self):
+        return self.count >= self.burn_in
+
+    @property
+    def std(self):
+        return max(self.var ** 0.5, 1e-8)
+
+    def update(self, returns_tensor):
+        """Update running stats from a batch of returns (tensor or numpy)."""
+        if isinstance(returns_tensor, torch.Tensor):
+            vals = returns_tensor.detach().cpu().numpy().flatten()
+        else:
+            vals = np.asarray(returns_tensor).flatten()
+
+        for v in vals:
+            self.count += 1
+            delta = v - self.mean
+            self.mean += delta / self.count
+            delta2 = v - self.mean
+            self.var += (delta * delta2 - self.var) / self.count
+
+    def normalize(self, x):
+        """Normalize returns for use as critic targets.
+        Before burn-in: returns pass through unchanged.
+        After  burn-in: (x - mean) / std
+        """
+        if not self.is_warmed_up:
+            return x
+        return (x - self.mean) / self.std
+
+    def denormalize(self, x):
+        """Convert critic predictions back to original reward scale for GAE.
+        Before burn-in: values pass through unchanged.
+        After  burn-in: x * std + mean
+        """
+        if not self.is_warmed_up:
+            return x
+        return x * self.std + self.mean
+
+    def state_dict(self):
+        return {'mean': self.mean, 'var': self.var, 'count': self.count}
+
+    def load_state_dict(self, d):
+        self.mean = d['mean']
+        self.var = d['var']
+        self.count = d['count']
+
+
 # ===========================================================================
 # Progress Plotting
 # ===========================================================================
@@ -272,7 +337,7 @@ def save_progress_plot(level_scores, ma, filename="mario_training_progress.png")
         if len(scores) == 0:
             continue
         epochs = range(len(scores))
-        plt.plot(epochs, scores, color=colors[idx], linewidth=1, alpha=0.4)
+        plt.plot(epochs, scores, color=colors[idx], linewidth=1, alpha=0.3)
         if len(scores) >= ma:
             moving_avg = np.convolve(scores, np.ones(ma) / ma, mode='valid')
             ma_epochs = range(ma - 1, len(scores))
@@ -383,12 +448,17 @@ def main(model_path, outdir):
     minibatch_size = NUM_STEPS // NUM_MINIBATCHES
     start_update = (global_step // NUM_STEPS) + 1  # Resume from correct update index
     reward_rms = RunningMeanStd(burn_in=REWARD_BURN_IN, clip=REWARD_CLIP)
+    return_normalizer = ReturnNormalizer(burn_in=REWARD_BURN_IN)
 
     if model_path and isinstance(checkpoint, dict):
         if 'reward_rms' in checkpoint:
             reward_rms.load_state_dict(checkpoint['reward_rms'])
             print(f"  Restored reward normalizer (count={reward_rms.count:.0f}, "
                   f"warmed_up={reward_rms.is_warmed_up})")
+        if 'return_normalizer' in checkpoint:
+            return_normalizer.load_state_dict(checkpoint['return_normalizer'])
+            print(f"  Restored return normalizer (count={return_normalizer.count:.0f}, "
+                  f"warmed_up={return_normalizer.is_warmed_up})")
 
     # --- Begin with a random level ---
     current_level = random.choice(TRAINING_LEVELS)
@@ -462,7 +532,7 @@ def main(model_path, outdir):
                             sc = level_scores[ln]
                             if len(sc) > 0:
                                 recent = sc[-CHECKPOINT_INTERVAL:]
-                                print(f"  {ln:30s} | Total Times Played={len(sc):5d} | Avg: {np.mean(recent):8.2f} | Max: {np.max(recent):8.2f}") 
+                                print(f"  {ln:30s} | n={len(sc):5d} | Avg: {np.mean(recent):8.2f} | Max: {np.max(recent):8.2f}")
                         print("=" * 100 + "\n")
 
                         try:
@@ -481,6 +551,7 @@ def main(model_path, outdir):
                             'episode_count': episode_count,
                             'level_scores': level_scores,
                             'reward_rms': reward_rms.state_dict(),
+                            'return_normalizer': return_normalizer.state_dict(),
                         }, save_path)
                         print(f"--> Checkpoint saved at episode {episode_count}")
 
@@ -498,22 +569,35 @@ def main(model_path, outdir):
                 # Bootstrap value for the last state
                 _, _, _, next_value = agent.get_action_and_value(obs_tensor.unsqueeze(0))
 
+                # Denormalize all critic predictions back to the original reward
+                # scale so that TD errors mix rewards and values in the same units.
+                # Before burn-in this is a no-op (passthrough).
+                denorm_values = return_normalizer.denormalize(value_buf)
+                denorm_next_value = return_normalizer.denormalize(next_value)
+
                 advantages = torch.zeros_like(reward_buf).to(device)
                 lastgaelam = 0.0
 
                 for t in reversed(range(NUM_STEPS)):
                     if t == NUM_STEPS - 1:
                         next_non_terminal = 1.0 - float(done)
-                        next_val = next_value
+                        next_val = denorm_next_value
                     else:
                         next_non_terminal = 1.0 - done_buf[t + 1]
-                        next_val = value_buf[t + 1]
+                        next_val = denorm_values[t + 1]
 
-                    delta = reward_buf[t] + GAMMA * next_val * next_non_terminal - value_buf[t]
+                    delta = reward_buf[t] + GAMMA * next_val * next_non_terminal - denorm_values[t]
                     lastgaelam = delta + GAMMA * GAE_LAMBDA * next_non_terminal * lastgaelam
                     advantages[t] = lastgaelam
 
-                returns = advantages + value_buf
+                # Raw returns in the original reward scale
+                raw_returns = advantages + denorm_values
+
+                # Update the return normalizer with this batch of returns
+                return_normalizer.update(raw_returns)
+
+                # Normalize returns for critic targets (after burn-in)
+                returns = return_normalizer.normalize(raw_returns)
 
             # ===============================================================
             # PHASE 3: PPO optimization (multiple epochs over the rollout)
@@ -612,6 +696,7 @@ def main(model_path, outdir):
             'episode_count': episode_count,
             'level_scores': level_scores,
             'reward_rms': reward_rms.state_dict(),
+            'return_normalizer': return_normalizer.state_dict(),
         }, save_path)
         print(f"Final model saved to {save_path}")
         print("Done.")
