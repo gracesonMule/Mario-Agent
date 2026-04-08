@@ -55,15 +55,22 @@ NUM_MINIBATCHES = 8            # Minibatches per PPO epoch
 UPDATE_EPOCHS = 4              # Number of PPO epochs per rollout
 GAMMA = 0.99                   # Discount factor
 GAE_LAMBDA = 0.95              # GAE lambda for advantage estimation
-CLIP_EPS = 0.2                 # PPO clipping parameter
+CLIP_EPS = 0.1                 # PPO clipping parameter
 CLIP_VLOSS = True              # Whether to clip the value loss
-ENT_COEF = 0.01                # Entropy bonus coefficient (encourages exploration)
-VF_COEF = 0.25                 # Value function loss coefficient (reduced to prevent critic dominating shared gradients)
+ENT_COEF = 0.005                # Entropy bonus coefficient (encourages exploration)
+VF_COEF = 0.5                 # Value function loss coefficient (reduced to prevent critic dominating shared gradients)
 MAX_GRAD_NORM = 0.5            # Gradient clipping
-REWARD_CLIP = 5.0              # Clamp rewards to [-REWARD_CLIP, REWARD_CLIP] (always applied as safety net)
+REWARD_CLIP = 10.0              # Clamp rewards to [-REWARD_CLIP, REWARD_CLIP] (always applied as safety net)
 REWARD_BURN_IN = 2048          # Collect this many reward samples before enabling normalization
 ANNEAL_LR = True               # Linearly anneal LR to 0 over training
 NORM_ADV = True                # Normalize advantages within each minibatch
+# ==========================================================================
+# Distance reward scaling and stuck-penalty base (applied in distance units)
+# ==========================================================================
+DISTANCE_REWARD_SCALE = 1.0    # Multiply raw delta-x by this to set reward magnitude
+STUCK_PENALTY_BASE = -15.0     # Base penalty (will be multiplied by scale)
+LEVEL_ADDITION_INTERVAL = 500_000  # Steps between adding a new training level
+INITIAL_ACTIVE_LEVELS = 1         # How many levels to start training with
 
 # ===========================================================================
 # Training Configuration
@@ -117,7 +124,7 @@ def yolo_to_lstm_vector(results):
 # Environment Wrappers (unchanged from your code)
 # ===========================================================================
 class StuckPenaltyWrapper(gym.Wrapper):
-    def __init__(self, env, max_steps_stuck=25, penalty=-15.0):
+    def __init__(self, env, max_steps_stuck=25, penalty=STUCK_PENALTY_BASE):
         super().__init__(env)
         self.max_steps_stuck = max_steps_stuck
         self.penalty = penalty
@@ -137,6 +144,41 @@ class StuckPenaltyWrapper(gym.Wrapper):
                 reward += self.penalty
                 done = True
         return obs, reward, done, info
+
+
+class DistanceRewardWrapper(gym.Wrapper):
+    """Replace environment rewards with distance traveled (delta x_pos).
+
+    The wrapper looks for `x_pos` in the `info` dict returned by the
+    underlying env.step(). On the first step after reset the distance is
+    treated as zero. The reported reward will be `current_x - prev_x`
+    multiplied by `scale`.
+    """
+
+    def __init__(self, env, key='x_pos', scale=1.0):
+        super().__init__(env)
+        self.key = key
+        self.scale = float(scale)
+        self.prev_x = None
+
+    def reset(self, **kwargs):
+        obs = self.env.reset(**kwargs)
+        self.prev_x = None
+        return obs
+
+    def step(self, action):
+        obs, _orig_reward, done, info = self.env.step(action)
+        current_x = info.get(self.key, None)
+        if current_x is None:
+            distance = 0.0
+        else:
+            if self.prev_x is None:
+                distance = 0.0
+            else:
+                distance = float(current_x - self.prev_x)
+            self.prev_x = float(current_x)
+
+        return obs, distance * self.scale, done, info
 
 
 class YoloObservationWrapper(gym.ObservationWrapper):
@@ -382,15 +424,19 @@ def main(model_path, outdir):
     def create_level_env(level_name):
         env = gym_super_mario_bros.make(level_name)
         env = JoypadSpace(env, SIMPLE_MOVEMENT)
+        env = DistanceRewardWrapper(env, key='x_pos', scale=DISTANCE_REWARD_SCALE)
         env = SkipFrame(env, skip=4)
-        env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=-15.0)
+        env = StuckPenaltyWrapper(env, max_steps_stuck=25, penalty=STUCK_PENALTY_BASE * DISTANCE_REWARD_SCALE)
         env = YoloObservationWrapper(env, yolo_model=yolo_model)
         env = VectorFrameStackWrapper(env, num_frames=NUM_FRAMES_FOR_YOLO)
         return env
 
-    print(f"Initializing {len(TRAINING_LEVELS)} training levels...")
-    level_envs = {level: create_level_env(level) for level in TRAINING_LEVELS}
-    print(f"Levels initialized: {TRAINING_LEVELS}\n")
+    print(f"Initializing {INITIAL_ACTIVE_LEVELS} training level(s); adding one every {LEVEL_ADDITION_INTERVAL} steps...")
+    active_levels = TRAINING_LEVELS[:INITIAL_ACTIVE_LEVELS]
+    level_envs = {level: create_level_env(level) for level in active_levels}
+    next_add_index = INITIAL_ACTIVE_LEVELS
+    next_add_step = LEVEL_ADDITION_INTERVAL
+    print(f"Active levels: {active_levels}\n")
 
     # --- Get shapes from any env ---
     sample_env = level_envs[TRAINING_LEVELS[0]]
@@ -460,8 +506,8 @@ def main(model_path, outdir):
             print(f"  Restored return normalizer (count={return_normalizer.count:.0f}, "
                   f"warmed_up={return_normalizer.is_warmed_up})")
 
-    # --- Begin with a random level ---
-    current_level = random.choice(TRAINING_LEVELS)
+    # --- Begin with a random active level ---
+    current_level = random.choice(active_levels)
     env = level_envs[current_level]
     obs = env.reset()
     obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
@@ -490,6 +536,15 @@ def main(model_path, outdir):
             agent.eval()
             for step in range(NUM_STEPS):
                 global_step += 1
+                # Add new training levels at milestones
+                if next_add_index < len(TRAINING_LEVELS) and global_step >= next_add_step:
+                    new_level = TRAINING_LEVELS[next_add_index]
+                    level_envs[new_level] = create_level_env(new_level)
+                    active_levels.append(new_level)
+                    next_add_index += 1
+                    next_add_step += LEVEL_ADDITION_INTERVAL
+                    print(f"--> Added new level to training: {new_level} (active_levels={len(active_levels)})")
+
                 obs_buf[step] = obs_tensor
                 done_buf[step] = float(done)
 
@@ -555,8 +610,8 @@ def main(model_path, outdir):
                         }, save_path)
                         print(f"--> Checkpoint saved at episode {episode_count}")
 
-                    # --- Reset into a randomly chosen level ---
-                    current_level = random.choice(TRAINING_LEVELS)
+                    # --- Reset into a randomly chosen active level ---
+                    current_level = random.choice(active_levels)
                     env = level_envs[current_level]
                     obs = env.reset()
                     obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
