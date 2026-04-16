@@ -79,6 +79,24 @@ TRAINING_LEVELS = [
     'SuperMarioBros-8-3-v0',
 ]
 
+def get_available_levels(global_step):
+    """Return the list of levels available for training at the current global_step."""
+    base_level = ['SuperMarioBros-1-1-v0']
+    level_additions = [
+        ('SuperMarioBros-1-2-v0', 500000),
+        ('SuperMarioBros-2-1-v0', 1000000),
+        ('SuperMarioBros-2-2-v0', 1500000),
+        ('SuperMarioBros-2-4-v0', 2000000),
+        ('SuperMarioBros-4-3-v0', 2500000),
+        ('SuperMarioBros-8-2-v0', 3000000),
+        ('SuperMarioBros-8-3-v0', 3500000),
+    ]
+    available = base_level.copy()
+    for level, threshold in level_additions:
+        if global_step >= threshold:
+            available.append(level)
+    return available
+
 CHECKPOINT_INTERVAL = 50       # Episodes between stat reports
 SAVE_INTERVAL = 500            # Episodes between model saves
 MOVING_AVG = 100               # Window for progress plot
@@ -278,18 +296,20 @@ def save_progress_plot(level_scores, ma, filename="mario_training_progress.png")
     colors = plt.cm.tab10(np.linspace(0, 1, len(TRAINING_LEVELS)))
 
     for idx, level_name in enumerate(TRAINING_LEVELS):
-        scores = np.array(level_scores.get(level_name, []))
-        if len(scores) == 0:
+        data = level_scores.get(level_name, [])
+        if len(data) == 0:
             continue
-        epochs = range(len(scores))
-        plt.plot(epochs, scores, color=colors[idx], linewidth=1, alpha=0.3)
+        episodes, scores = zip(*data)
+        episodes = np.array(episodes)
+        scores = np.array(scores)
+        plt.plot(episodes, scores, color=colors[idx], linewidth=1, alpha=0.3)
         if len(scores) >= ma:
             moving_avg = np.convolve(scores, np.ones(ma) / ma, mode='valid')
-            ma_epochs = range(ma - 1, len(scores))
-            plt.plot(ma_epochs, moving_avg, color=colors[idx], label=f'{level_name}', linewidth=2.5, alpha=0.9)
+            ma_episodes = episodes[ma-1:]
+            plt.plot(ma_episodes, moving_avg, color=colors[idx], label=f'{level_name}', linewidth=2.5, alpha=0.9)
 
     plt.title("Mario PPO Training Progress")
-    plt.xlabel(f"Episode per level (MA Window: {ma})")
+    plt.xlabel(f"Global Episode (MA Window: {ma})")
     plt.ylabel("Total Reward")
     plt.legend(loc='best', fontsize=8)
     plt.grid(True, alpha=0.3)
@@ -406,7 +426,7 @@ def main(model_path, outdir):
                   f"warmed_up={return_normalizer.is_warmed_up})")
 
     # --- Begin with a random level ---
-    current_level = random.choice(TRAINING_LEVELS)
+    current_level = random.choice(get_available_levels(global_step))
     env = level_envs[current_level]
     obs = env.reset()
     obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
@@ -459,7 +479,7 @@ def main(model_path, outdir):
 
                 if done:
                     # Log completed episode
-                    level_scores[current_level].append(episode_reward)
+                    level_scores[current_level].append((episode_count, episode_reward))
                     episode_count += 1
 
                     if episode_count % 10 == 0:
@@ -478,8 +498,8 @@ def main(model_path, outdir):
                         for ln in TRAINING_LEVELS:
                             sc = level_scores[ln]
                             if len(sc) > 0:
-                                recent = sc[-CHECKPOINT_INTERVAL:]
-                                print(f"  {ln:30s} | n={len(sc):5d} | Avg: {np.mean(recent):8.2f} | Max: {np.max(recent):8.2f}")
+                                recent_rewards = [r for _, r in sc[-CHECKPOINT_INTERVAL:]]
+                                print(f"  {ln:30s} | n={len(sc):5d} | Avg: {np.mean(recent_rewards):8.2f} | Max: {np.max(recent_rewards):8.2f}")
                         print("=" * 100 + "\n")
 
                         try:
@@ -502,7 +522,7 @@ def main(model_path, outdir):
                         print(f"--> Checkpoint saved at episode {episode_count}")
 
                     # --- Reset into a randomly chosen level ---
-                    current_level = random.choice(TRAINING_LEVELS)
+                    current_level = random.choice(get_available_levels(global_step))
                     env = level_envs[current_level]
                     obs = env.reset()
                     obs_tensor = torch.tensor(obs, dtype=torch.float32).to(device)
